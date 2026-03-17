@@ -1,152 +1,37 @@
 import OpenAI from "openai";
 
 import { config } from "./config.js";
-import { callAtlassianTool } from "./atlassianMcpClient.js";
+import {
+  buildOpenAiToolRegistry,
+  callAtlassianTool,
+  listAvailableTools,
+} from "./atlassianMcpClient.js";
 import { buildError } from "./http.js";
 
 const openai = new OpenAI({
   apiKey: config.openai.apiKey,
 });
 
-const TOOL_DEFINITIONS = [
-  {
-    type: "function",
-    name: "searchJira",
-    description:
-      "Search Jira issues in the selected Atlassian cloud site using JQL.",
-    parameters: {
-      type: "object",
-      properties: {
-        cloudId: {
-          type: "string",
-          description:
-            "Atlassian cloud ID. If omitted, the server uses the selected site.",
-        },
-        jql: {
-          type: "string",
-          description: "A Jira Query Language string.",
-        },
-        fields: {
-          type: "array",
-          description: "Optional Jira fields to request.",
-          items: {
-            type: "string",
-          },
-        },
-      },
-      required: ["jql"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "getIssue",
-    description: "Get a Jira issue by issue key or issue ID.",
-    parameters: {
-      type: "object",
-      properties: {
-        cloudId: {
-          type: "string",
-          description:
-            "Atlassian cloud ID. If omitted, the server uses the selected site.",
-        },
-        issueIdOrKey: {
-          type: "string",
-          description: "Issue key like DEMO-123 or a Jira issue ID.",
-        },
-        fields: {
-          type: "array",
-          description: "Optional Jira fields to request.",
-          items: {
-            type: "string",
-          },
-        },
-      },
-      required: ["issueIdOrKey"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "searchConfluence",
-    description:
-      "Search Confluence content in the selected Atlassian cloud site using CQL.",
-    parameters: {
-      type: "object",
-      properties: {
-        cloudId: {
-          type: "string",
-          description:
-            "Atlassian cloud ID. If omitted, the server uses the selected site.",
-        },
-        cql: {
-          type: "string",
-          description: "A Confluence Query Language string.",
-        },
-        limit: {
-          type: "integer",
-          description: "Optional result limit.",
-        },
-      },
-      required: ["cql"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "createIssue",
-    description: "Create a Jira issue in the selected Atlassian cloud site.",
-    parameters: {
-      type: "object",
-      properties: {
-        cloudId: {
-          type: "string",
-          description:
-            "Atlassian cloud ID. If omitted, the server uses the selected site.",
-        },
-        projectKey: {
-          type: "string",
-          description: "Jira project key, for example DEMO.",
-        },
-        issueTypeName: {
-          type: "string",
-          description: "Jira issue type name, for example Task or Bug.",
-        },
-        summary: {
-          type: "string",
-          description: "Issue summary.",
-        },
-        description: {
-          type: "string",
-          description: "Optional issue description.",
-        },
-        assigneeAccountId: {
-          type: "string",
-          description: "Optional Jira account ID for the assignee.",
-        },
-        parentIdOrKey: {
-          type: "string",
-          description: "Optional parent issue key or ID.",
-        },
-      },
-      required: ["projectKey", "issueTypeName", "summary"],
-      additionalProperties: false,
-    },
-  },
-];
-
-function buildInstructions(defaultCloudId) {
+function buildInstructions(defaultCloudId, toolRegistry) {
   const cloudIdLine = defaultCloudId
     ? `Use Atlassian cloud ID "${defaultCloudId}" unless the user explicitly gives a different one.`
     : "If the user asks for Jira or Confluence data and no cloud ID is available, ask them to select a site first.";
+  const preferredToolsLine =
+    toolRegistry.preferredToolNames.length > 0
+      ? `Preferred helper tools for common tasks: ${toolRegistry.preferredToolNames.join(", ")}. Use them when they fit the request.`
+      : "Use the available Atlassian tools that best match the user's request.";
+  const mutatingToolsLine = toolRegistry.hasMutatingTools
+    ? "For tools that create, update, delete, transition, or otherwise change Atlassian data, confirm the user's intent and required fields before calling them."
+    : "Only call tools when the user clearly wants Atlassian data or an Atlassian action.";
 
   return [
     "You are an Atlassian assistant connected to Jira and Confluence through backend app tools.",
-    "Use the available tools whenever the user asks for Jira or Confluence data.",
+    "Use the available tools whenever the user asks for Jira or Confluence data or actions.",
     cloudIdLine,
+    preferredToolsLine,
     "For Jira searches, generate valid JQL from the user's request.",
     "For Confluence searches, generate valid CQL from the user's request.",
-    "Only call createIssue when the user explicitly wants to create an issue and the required fields are known.",
+    mutatingToolsLine,
     "When a tool returns structured data, summarize the most important details instead of dumping raw JSON unless the user asks for raw output.",
   ].join(" ");
 }
@@ -166,26 +51,26 @@ function normalizeFields(fields) {
   return undefined;
 }
 
-function normalizeToolArgs(name, args, defaultCloudId) {
-  const cloudId = args.cloudId ?? defaultCloudId ?? null;
+function normalizeToolArgs(name, args, defaultCloudId, toolMetadata) {
+  const normalizedArgs =
+    args && typeof args === "object" && !Array.isArray(args) ? { ...args } : {};
 
-  if (!cloudId) {
+  if (toolMetadata?.injectDefaultCloudId && !normalizedArgs.cloudId && defaultCloudId) {
+    normalizedArgs.cloudId = defaultCloudId;
+  }
+
+  if (toolMetadata?.requireCloudId && !normalizedArgs.cloudId) {
     throw buildError(
       `The ${name} tool needs a cloudId. Select a site first or pass cloudId explicitly.`,
       400,
     );
   }
 
-  const baseArgs = {
-    ...args,
-    cloudId,
-  };
-
-  if ("fields" in baseArgs) {
-    baseArgs.fields = normalizeFields(baseArgs.fields);
+  if ("fields" in normalizedArgs) {
+    normalizedArgs.fields = normalizeFields(normalizedArgs.fields);
   }
 
-  return baseArgs;
+  return normalizedArgs;
 }
 
 function extractResultPreview(result) {
@@ -206,9 +91,37 @@ function extractResultPreview(result) {
   return "Tool executed without a text preview.";
 }
 
-async function executeTool(name, rawArgs, accessToken, defaultCloudId) {
-  const normalizedArgs = normalizeToolArgs(name, rawArgs, defaultCloudId);
-  const mcpResult = await callAtlassianTool(accessToken, name, normalizedArgs);
+async function executeTool(
+  name,
+  rawArgs,
+  accessToken,
+  defaultCloudId,
+  toolRegistry,
+) {
+  const toolMetadata = toolRegistry.registry.get(name);
+
+  if (!toolMetadata) {
+    throw buildError(
+      `The tool "${name}" is not available for this Atlassian session.`,
+      400,
+    );
+  }
+
+  const normalizedArgs = normalizeToolArgs(
+    name,
+    rawArgs,
+    defaultCloudId,
+    toolMetadata,
+  );
+  const mcpResult = await callAtlassianTool(
+    accessToken,
+    toolMetadata.target,
+    normalizedArgs,
+    {
+      resolveMode: toolMetadata.resolveMode,
+      availableTools: toolRegistry.availableTools,
+    },
+  );
 
   return {
     name,
@@ -257,14 +170,17 @@ export async function generateChatResponse({
   accessToken,
   defaultCloudId,
 }) {
+  const availableTools = await listAvailableTools(accessToken);
+  const toolRegistry = buildOpenAiToolRegistry(availableTools);
   const toolCalls = [];
+  let resolvedCloudId = defaultCloudId ?? null;
 
   let response = await openai.responses.create({
     model: config.openai.model,
-    instructions: buildInstructions(defaultCloudId),
+    instructions: buildInstructions(defaultCloudId, toolRegistry),
     previous_response_id: session.chat.previousResponseId ?? undefined,
     input: userMessage,
-    tools: TOOL_DEFINITIONS,
+    tools: toolRegistry.tools,
     tool_choice: "auto",
   });
 
@@ -287,6 +203,7 @@ export async function generateChatResponse({
           parsedArgs,
           accessToken,
           defaultCloudId,
+          toolRegistry,
         );
 
         toolCalls.push({
@@ -295,6 +212,10 @@ export async function generateChatResponse({
           args: toolExecution.args,
           preview: extractResultPreview(toolExecution.mcpResult),
         });
+
+        if (typeof toolExecution.args.cloudId === "string" && toolExecution.args.cloudId) {
+          resolvedCloudId = toolExecution.args.cloudId;
+        }
 
         functionOutputs.push({
           type: "function_call_output",
@@ -323,12 +244,12 @@ export async function generateChatResponse({
       model: config.openai.model,
       previous_response_id: response.id,
       input: functionOutputs,
-      tools: TOOL_DEFINITIONS,
+      tools: toolRegistry.tools,
     });
   }
 
   session.chat.previousResponseId = response.id;
-  session.chat.activeCloudId = defaultCloudId ?? session.chat.activeCloudId ?? null;
+  session.chat.activeCloudId = resolvedCloudId ?? session.chat.activeCloudId ?? null;
 
   return {
     responseId: response.id,

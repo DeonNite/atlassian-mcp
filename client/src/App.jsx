@@ -4,8 +4,15 @@ const INITIAL_MESSAGES = [
   {
     role: "assistant",
     content:
-      "Connect Atlassian, choose a cloud site, then ask me to search Jira, fetch an issue, search Confluence, or create a Jira issue.",
+      "Connect Atlassian, lock onto a cloud site, then ask me to read or act across Jira and Confluence. I will use the stable helper tools first and fall back to any additional MCP tools your Atlassian session exposes.",
   },
+];
+
+const QUICK_PROMPTS = [
+  "Search Jira for open bugs assigned to me and group them by priority.",
+  "Update DEMO-42 to In Progress and add a short implementation note.",
+  "Find the latest Confluence page about onboarding and summarize it.",
+  "Create a Jira task for documenting the Atlassian MCP integration rollout.",
 ];
 
 async function apiFetch(path, options = {}) {
@@ -20,7 +27,9 @@ async function apiFetch(path, options = {}) {
 
   const payload = await response
     .json()
-    .catch(() => ({ error: "The server returned a non-JSON response." }));
+    .catch(() => ({
+      error: `The server returned a non-JSON response for ${path}.`,
+    }));
 
   if (!response.ok) {
     throw new Error(payload.error || "Request failed.");
@@ -45,6 +54,35 @@ function usePersistedCloudId() {
   }, [cloudId]);
 
   return [cloudId, setCloudId];
+}
+
+function buildWorkflowSteps({ connected, activeCloudId, hasConversation, busy }) {
+  return [
+    {
+      label: "Authorize",
+      title: connected ? "Atlassian connected" : "Connect Atlassian",
+      detail: connected
+        ? "OAuth session is active and the backend can call Atlassian."
+        : "Start the Atlassian OAuth flow from the setup rail.",
+      state: connected ? "done" : "active",
+    },
+    {
+      label: "Scope",
+      title: activeCloudId ? "Site selected" : "Pick a cloud site",
+      detail: activeCloudId
+        ? `Current target: ${activeCloudId}`
+        : "Choose a discovered site or paste a cloud ID manually.",
+      state: activeCloudId ? "done" : connected ? "active" : "pending",
+    },
+    {
+      label: "Operate",
+      title: hasConversation ? "Conversation active" : "Run Jira and Confluence tasks",
+      detail: busy
+        ? "The model is executing a request now."
+        : "Use chat to search, create, update, and inspect Atlassian data.",
+      state: hasConversation ? "done" : activeCloudId ? "active" : "pending",
+    },
+  ];
 }
 
 export default function App() {
@@ -72,6 +110,42 @@ export default function App() {
       })),
     [resources],
   );
+
+  const activeCloudId = status.activeCloudId || cloudId || "";
+  const chatReadiness = !status.connected
+    ? "Connect Atlassian to unlock the workspace."
+    : activeCloudId
+      ? `Requests will target ${activeCloudId}.`
+      : "Choose a cloud site so the assistant can scope Jira and Confluence calls.";
+  const readinessPill = !status.connected
+    ? "Disconnected"
+    : activeCloudId
+      ? "Ready"
+      : "Select site";
+  const workflowSteps = buildWorkflowSteps({
+    connected: status.connected,
+    activeCloudId,
+    hasConversation: status.hasConversation,
+    busy,
+  });
+  const heroStats = [
+    {
+      label: "Model",
+      value: status.model || "Unavailable",
+    },
+    {
+      label: "Sites",
+      value: `${resourceOptions.length}`,
+    },
+    {
+      label: "Messages",
+      value: `${messages.length}`,
+    },
+    {
+      label: "Tool calls",
+      value: `${toolCalls.length}`,
+    },
+  ];
 
   async function loadStatus() {
     const payload = await apiFetch("/api/auth/status", { method: "GET" });
@@ -145,6 +219,7 @@ export default function App() {
         connected: false,
         expiresAt: null,
         hasConversation: false,
+        activeCloudId: null,
       }));
       setResources([]);
       setToolCalls([]);
@@ -185,6 +260,10 @@ export default function App() {
     }
   }
 
+  function handleQuickPrompt(prompt) {
+    setDraft(prompt);
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
 
@@ -218,7 +297,7 @@ export default function App() {
           role: "assistant",
           content:
             payload.text ||
-            "The model returned no text. Check the tool call panel for details.",
+            "The model returned no text. Check the execution log for details.",
         },
       ]);
       setToolCalls(payload.toolCalls ?? []);
@@ -248,172 +327,298 @@ export default function App() {
 
       <main className="layout">
         <section className="hero">
-          <p className="eyebrow">Atlassian MCP + OpenAI</p>
-          <h1>React frontend, Node backend, real MCP tool execution.</h1>
-          <p className="hero-copy">
-            This demo passes user prompts to OpenAI, exposes app-level tools, and
-            resolves those tools by calling Atlassian&apos;s remote MCP server from
-            the backend.
-          </p>
+          <div className="hero-copy-block">
+            <p className="eyebrow">Atlassian MCP + OpenAI</p>
+            <h1>Operate Jira and Confluence from one workspace.</h1>
+            <p className="hero-copy">
+              This UI is structured around the real workflow in this project:
+              authenticate against Atlassian, scope the session to a cloud site,
+              chat with the OpenAI-backed assistant, and inspect every MCP tool
+              call the backend executes.
+            </p>
+          </div>
+
+          <div className="hero-sidecard">
+            <p className="panel-kicker">Run status</p>
+            <h2>{readinessPill === "Ready" ? "Workspace armed" : "Setup in progress"}</h2>
+            <p className="panel-note">{chatReadiness}</p>
+
+            <div className="hero-stat-grid">
+              {heroStats.map((stat) => (
+                <div className="hero-stat" key={stat.label}>
+                  <span>{stat.label}</span>
+                  <strong>{stat.value}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
         </section>
 
-        <section className="control-grid">
-          <article className="panel status-panel">
-            <div className="panel-heading">
-              <h2>Session</h2>
-              <span className={status.connected ? "status-pill ok" : "status-pill"}>
-                {status.connected ? "Connected" : "Disconnected"}
-              </span>
-            </div>
-
-            <div className="kv">
-              <span>Model</span>
-              <strong>{status.model || "Unavailable"}</strong>
-            </div>
-            <div className="kv">
-              <span>Token expiry</span>
-              <strong>{formatExpiry(status.expiresAt)}</strong>
-            </div>
-            <div className="kv">
-              <span>Active cloud</span>
-              <strong>{status.activeCloudId || cloudId || "Not selected"}</strong>
-            </div>
-
-            <div className="button-row">
-              <button className="primary-button" onClick={handleConnect} disabled={busy}>
-                Connect Atlassian
-              </button>
-              <button className="ghost-button" onClick={handleDisconnect} disabled={busy}>
-                Disconnect
-              </button>
-            </div>
-          </article>
-
-          <article className="panel resource-panel">
-            <div className="panel-heading">
-              <h2>Cloud Site</h2>
-              <button
-                className="ghost-button slim"
-                onClick={handleRefreshResources}
-                disabled={!status.connected || loadingResources}
-              >
-                {loadingResources ? "Loading..." : "Refresh"}
-              </button>
-            </div>
-
-            <label className="field">
-              <span>Select a discovered site</span>
-              <select
-                value={cloudId}
-                onChange={(event) => setCloudId(event.target.value)}
-                disabled={!status.connected || resourceOptions.length === 0}
-              >
-                <option value="">
-                  {resourceOptions.length > 0
-                    ? "Choose a cloud site"
-                    : "No sites loaded yet"}
-                </option>
-                {resourceOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="field">
-              <span>Or enter cloudId manually</span>
-              <input
-                value={cloudId}
-                onChange={(event) => setCloudId(event.target.value)}
-                placeholder="e.g. 12345678-abcd-1234-abcd-1234567890ab"
-              />
-            </label>
-
-            <p className="panel-note">
-              The backend resets the OpenAI conversation when the cloud ID changes.
-            </p>
-          </article>
+        <section className="workflow-strip">
+          {workflowSteps.map((step, index) => (
+            <article className="workflow-step" data-state={step.state} key={step.label}>
+              <span className="workflow-index">0{index + 1}</span>
+              <div>
+                <p>{step.label}</p>
+                <h2>{step.title}</h2>
+                <span>{step.detail}</span>
+              </div>
+            </article>
+          ))}
         </section>
 
         {error ? <div className="error-banner">{error}</div> : null}
 
-        <section className="chat-grid">
-          <article className="panel chat-panel">
-            <div className="panel-heading">
-              <h2>Chat</h2>
-              <button
-                className="ghost-button slim"
-                onClick={handleResetConversation}
-                disabled={busy}
-              >
-                Reset chat
-              </button>
-            </div>
+        <section className="workspace-grid">
+          <aside className="rail setup-rail">
+            <article className="panel panel-emphasis">
+              <p className="panel-kicker">Mission control</p>
+              <h2>Prepare the session</h2>
+              <p className="panel-note">
+                Keep setup on the left so the center workspace stays focused on
+                conversations and outputs.
+              </p>
+            </article>
 
-            <div className="messages">
-              {messages.map((message, index) => (
-                <div
-                  key={`${message.role}-${index}`}
-                  className={`message ${message.role}`}
-                >
-                  <span className="message-role">{message.role}</span>
-                  <p>{message.content}</p>
+            <article className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="panel-kicker">Connection</p>
+                  <h2>Atlassian auth</h2>
                 </div>
-              ))}
-            </div>
+                <span className={status.connected ? "status-pill ok" : "status-pill"}>
+                  {status.connected ? "Connected" : "Disconnected"}
+                </span>
+              </div>
 
-            <form className="composer" onSubmit={handleSubmit}>
-              <textarea
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                placeholder="Example: Search Jira for open bugs assigned to me."
-                rows={4}
-                disabled={busy}
-              />
+              <div className="metric-stack">
+                <div className="metric-card">
+                  <span>Token expiry</span>
+                  <strong>{formatExpiry(status.expiresAt)}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Conversation</span>
+                  <strong>{status.hasConversation ? "Active" : "Not started"}</strong>
+                </div>
+              </div>
+
               <div className="button-row">
-                <button
-                  className="primary-button"
-                  type="submit"
-                  disabled={busy || !status.connected}
-                >
-                  {busy ? "Working..." : "Send"}
+                <button className="primary-button" onClick={handleConnect} disabled={busy}>
+                  Connect Atlassian
+                </button>
+                <button className="ghost-button" onClick={handleDisconnect} disabled={busy}>
+                  Disconnect
                 </button>
               </div>
-            </form>
-          </article>
+            </article>
 
-          <article className="panel tool-panel">
-            <div className="panel-heading">
-              <h2>Tool Calls</h2>
-              <span className="status-pill">{toolCalls.length} entries</span>
-            </div>
+            <article className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="panel-kicker">Scope</p>
+                  <h2>Cloud site</h2>
+                </div>
+                <button
+                  className="ghost-button slim"
+                  onClick={handleRefreshResources}
+                  disabled={!status.connected || loadingResources}
+                >
+                  {loadingResources ? "Loading..." : "Refresh"}
+                </button>
+              </div>
 
-            <div className="tool-list">
-              {toolCalls.length === 0 ? (
-                <p className="panel-note">
-                  Tool execution previews appear here after each chat request.
-                </p>
-              ) : (
-                toolCalls.map((toolCall, index) => (
-                  <div className="tool-card" key={`${toolCall.name}-${index}`}>
-                    <div className="tool-head">
-                      <strong>{toolCall.name}</strong>
-                      <span>{toolCall.toolName || "No MCP tool resolved"}</span>
-                    </div>
-                    {toolCall.error ? (
-                      <p className="tool-error">{toolCall.error}</p>
-                    ) : (
-                      <>
-                        <pre>{JSON.stringify(toolCall.args, null, 2)}</pre>
-                        <p>{toolCall.preview}</p>
-                      </>
-                    )}
+              <label className="field">
+                <span>Select a discovered site</span>
+                <select
+                  value={cloudId}
+                  onChange={(event) => setCloudId(event.target.value)}
+                  disabled={!status.connected || resourceOptions.length === 0}
+                >
+                  <option value="">
+                    {resourceOptions.length > 0
+                      ? "Choose a cloud site"
+                      : "No sites loaded yet"}
+                  </option>
+                  {resourceOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field">
+                <span>Or enter cloudId manually</span>
+                <input
+                  value={cloudId}
+                  onChange={(event) => setCloudId(event.target.value)}
+                  placeholder="e.g. 12345678-abcd-1234-abcd-1234567890ab"
+                />
+              </label>
+
+              <div className="metric-card metric-inline">
+                <span>Active target</span>
+                <strong>{activeCloudId || "Not selected"}</strong>
+              </div>
+            </article>
+
+            <article className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="panel-kicker">Jump start</p>
+                  <h2>Quick asks</h2>
+                </div>
+              </div>
+
+              <div className="prompt-list">
+                {QUICK_PROMPTS.map((prompt) => (
+                  <button
+                    className="prompt-chip"
+                    key={prompt}
+                    onClick={() => handleQuickPrompt(prompt)}
+                    disabled={busy}
+                    type="button"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </article>
+          </aside>
+
+          <section className="conversation-column">
+            <article className="panel chat-panel">
+              <div className="panel-heading panel-heading-spread">
+                <div>
+                  <p className="panel-kicker">Conversation</p>
+                  <h2>Atlassian operator</h2>
+                  <p className="panel-note">{chatReadiness}</p>
+                </div>
+
+                <div className="button-row compact-row">
+                  <span className={activeCloudId ? "status-pill ok" : "status-pill"}>
+                    {readinessPill}
+                  </span>
+                  <button
+                    className="ghost-button slim"
+                    onClick={handleResetConversation}
+                    disabled={busy}
+                  >
+                    Reset chat
+                  </button>
+                </div>
+              </div>
+
+              <div className="messages">
+                {messages.map((message, index) => (
+                  <div
+                    key={`${message.role}-${index}`}
+                    className={`message ${message.role}`}
+                  >
+                    <span className="message-role">{message.role}</span>
+                    <p>{message.content}</p>
                   </div>
-                ))
-              )}
-            </div>
-          </article>
+                ))}
+              </div>
+
+              <form className="composer" onSubmit={handleSubmit}>
+                <div className="composer-meta">
+                  <span>Selected site</span>
+                  <strong>{activeCloudId || "Choose one before issuing scoped work"}</strong>
+                </div>
+
+                <textarea
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  placeholder="Ask for Jira search, issue creation, issue updates, Confluence lookup, or any other Atlassian action your MCP session exposes."
+                  rows={5}
+                  disabled={busy}
+                />
+
+                <div className="button-row composer-actions">
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={busy || !status.connected}
+                  >
+                    {busy ? "Working..." : "Send request"}
+                  </button>
+                  <span className="composer-note">
+                    Every tool invocation is logged in the execution rail.
+                  </span>
+                </div>
+              </form>
+            </article>
+          </section>
+
+          <aside className="rail activity-rail">
+            <article className="panel tool-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="panel-kicker">Execution</p>
+                  <h2>Run log</h2>
+                </div>
+                <span className="status-pill">{toolCalls.length} entries</span>
+              </div>
+
+              <div className="tool-list">
+                {toolCalls.length === 0 ? (
+                  <div className="empty-state">
+                    <strong>No tool activity yet</strong>
+                    <p>
+                      Once you send a request, the resolved MCP tool names,
+                      arguments, previews, and any failures will appear here.
+                    </p>
+                  </div>
+                ) : (
+                  toolCalls.map((toolCall, index) => (
+                    <div className="tool-card" key={`${toolCall.name}-${index}`}>
+                      <div className="tool-head">
+                        <strong>{toolCall.name}</strong>
+                        <span>{toolCall.toolName || "No MCP tool resolved"}</span>
+                      </div>
+                      {toolCall.error ? (
+                        <p className="tool-error">{toolCall.error}</p>
+                      ) : (
+                        <>
+                          <pre>{JSON.stringify(toolCall.args, null, 2)}</pre>
+                          <p>{toolCall.preview}</p>
+                        </>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </article>
+
+            <article className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="panel-kicker">Snapshot</p>
+                  <h2>Session facts</h2>
+                </div>
+              </div>
+
+              <div className="metric-stack">
+                <div className="metric-card">
+                  <span>Model</span>
+                  <strong>{status.model || "Unavailable"}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Loaded sites</span>
+                  <strong>{resourceOptions.length}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Messages</span>
+                  <strong>{messages.length}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Last known cloud</span>
+                  <strong>{activeCloudId || "None"}</strong>
+                </div>
+              </div>
+            </article>
+          </aside>
         </section>
       </main>
     </div>

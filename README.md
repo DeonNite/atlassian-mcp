@@ -5,6 +5,7 @@ This repository implements a React + Node.js chatbot that:
 - authenticates a user against Atlassian on the backend,
 - connects to Atlassian's remote MCP server,
 - exposes stable app-level tools named `searchJira`, `getIssue`, `searchConfluence`, and `createIssue`,
+- dynamically surfaces additional Atlassian MCP tools from the live `listTools()` response,
 - lets OpenAI call those tools through the Responses API,
 - includes direct debug endpoints so you can verify real MCP calls outside the chat loop.
 
@@ -14,7 +15,8 @@ This repository implements a React + Node.js chatbot that:
 - `server/`: Express API, Atlassian OAuth flow, MCP client, OpenAI orchestration
 - Atlassian tool execution path:
   - Chat request reaches Node
-  - OpenAI chooses one of the four function tools
+  - Node lists the live Atlassian MCP tools and converts them into OpenAI-callable function tools
+  - OpenAI chooses the best matching tool for the user request
   - Node executes the matching Atlassian MCP tool via the official MCP SDK
   - The MCP result is returned to OpenAI as function output
   - OpenAI generates the assistant reply
@@ -46,7 +48,7 @@ Your Atlassian OAuth app should include at least the scopes needed by the four t
 - Jira search and issue lookup: `read:jira-work`
 - Jira issue creation: `write:jira-work`
 - Confluence search: `search:confluence` and `read:confluence-content.all`
-- Token refresh in long-lived sessions: `offline_access`
+- Optional token refresh in long-lived sessions: `offline_access` if your Atlassian OAuth client is allowed to request it
 
 Your redirect URI must match `ATLASSIAN_REDIRECT_URI`.
 
@@ -79,6 +81,8 @@ Open `http://localhost:5173`.
 3. Choose a cloud site from the dropdown populated by Atlassian accessible resources.
 4. Ask the assistant to search Jira, retrieve an issue, search Confluence, or create an issue.
 
+The backend also exposes any additional Atlassian MCP tools returned by Atlassian for the authenticated session, so the assistant can perform broader read/write actions when those tools are available.
+
 ## Direct MCP debug endpoints
 
 These endpoints perform real MCP tool calls on the backend after Atlassian authentication:
@@ -88,6 +92,7 @@ These endpoints perform real MCP tool calls on the backend after Atlassian authe
 - `POST /api/mcp/get-issue`
 - `POST /api/mcp/search-confluence`
 - `POST /api/mcp/create-issue`
+- `POST /api/mcp/call`
 
 Example request body for Jira search:
 
@@ -99,8 +104,23 @@ Example request body for Jira search:
 }
 ```
 
+Example request body for the generic MCP call endpoint:
+
+```json
+{
+  "name": "updateJiraIssue",
+  "args": {
+    "cloudId": "your-cloud-id",
+    "issueIdOrKey": "DEMO-42",
+    "fields": {
+      "summary": "Updated from the generic MCP endpoint"
+    }
+  }
+}
+```
+
 ## Notes
 
 - The session store is in-memory. This is fine for a local demo and should be replaced for production.
 - The backend resets chat state when you switch Atlassian cloud IDs.
-- If the Atlassian access token expires and a refresh token is available, the server refreshes it automatically.
+- If `offline_access` is enabled for your Atlassian OAuth client and a refresh token is available, the server refreshes it automatically. Otherwise users will need to reconnect after the access token expires.

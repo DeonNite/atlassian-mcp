@@ -180,6 +180,26 @@ app.post("/api/mcp/search-jira", directToolRoute("searchJira"));
 app.post("/api/mcp/get-issue", directToolRoute("getIssue"));
 app.post("/api/mcp/search-confluence", directToolRoute("searchConfluence"));
 app.post("/api/mcp/create-issue", directToolRoute("createIssue"));
+app.post(
+  "/api/mcp/call",
+  asyncRoute(async (req, res) => {
+    const { name, toolName, args, arguments: toolArguments } = req.body ?? {};
+    const requestedTool = name ?? toolName;
+
+    if (!requestedTool || !String(requestedTool).trim()) {
+      throw buildError("The generic MCP call endpoint requires a tool name.", 400);
+    }
+
+    const accessToken = await ensureValidAccessToken(req.session);
+    const result = await callAtlassianTool(
+      accessToken,
+      String(requestedTool).trim(),
+      args ?? toolArguments ?? {},
+    );
+
+    res.json(result);
+  }),
+);
 
 app.post(
   "/api/chat",

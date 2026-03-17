@@ -15,7 +15,6 @@ const DEFAULT_ATLASSIAN_SCOPES = [
   "write:jira-work",
   "search:confluence",
   "read:confluence-content.all",
-  "offline_access",
 ];
 
 function readEnv(name, { required = false, defaultValue = "" } = {}) {
