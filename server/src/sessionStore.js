@@ -9,6 +9,7 @@ function buildEmptySession() {
     lastSeenAt: Date.now(),
     oauth: null,
     atlassian: null,
+    lastOauthCallback: null,
     chat: {
       previousResponseId: null,
       activeCloudId: null,
@@ -62,5 +63,9 @@ export function clearConversation(session) {
 export function clearAtlassianSession(session) {
   session.oauth = null;
   session.atlassian = null;
+  session.lastOauthCallback = null;
   clearConversation(session);
 }
+
+
+

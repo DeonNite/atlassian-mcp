@@ -22,7 +22,7 @@ function createPkcePair() {
 
 function normalizeTokenPayload(payload) {
   if (!payload.access_token) {
-    throw buildError("Atlassian token response did not include an access token.");
+    throw buildError("Atlassian Rovo MCP OAuth 2.1 did not return an access token.");
   }
 
   return {
@@ -45,13 +45,17 @@ async function requestToken(body) {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw buildError("Atlassian token exchange failed.", response.status, payload);
+    throw buildError(
+      "Atlassian Rovo MCP OAuth 2.1 token exchange failed.",
+      response.status,
+      payload,
+    );
   }
 
   return normalizeTokenPayload(payload);
 }
 
-export function buildAtlassianAuthorizeUrl(session) {
+export async function buildAtlassianAuthorizeUrl(session) {
   const state = base64Url(randomBytes(24));
   const { codeVerifier, codeChallenge } = createPkcePair();
 
@@ -68,21 +72,24 @@ export function buildAtlassianAuthorizeUrl(session) {
     redirect_uri: config.atlassian.redirectUri,
     response_type: "code",
     state,
-    prompt: "consent",
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
   });
+
+  if (config.atlassian.scopes.includes("offline_access")) {
+    query.set("prompt", "consent");
+  }
 
   return `${config.atlassian.authorizeUrl}?${query.toString()}`;
 }
 
 export async function exchangeAuthorizationCode(session, code, returnedState) {
   if (!session.oauth?.state || !session.oauth?.codeVerifier) {
-    throw buildError("Missing Atlassian OAuth session state.", 400);
+    throw buildError("Missing Atlassian Rovo MCP OAuth 2.1 session state.", 400);
   }
 
   if (returnedState !== session.oauth.state) {
-    throw buildError("Atlassian OAuth state validation failed.", 400);
+    throw buildError("Atlassian Rovo MCP OAuth 2.1 state validation failed.", 400);
   }
 
   const token = await requestToken({
@@ -111,7 +118,7 @@ export async function refreshAccessToken(refreshToken) {
 
 export async function ensureValidAccessToken(session) {
   if (!session.atlassian?.accessToken) {
-    throw buildError("Connect Atlassian before using MCP tools.", 401);
+    throw buildError("Connect Atlassian Rovo MCP before using MCP tools.", 401);
   }
 
   const expiresSoon = Date.now() >= session.atlassian.expiresAt - 60_000;
@@ -122,7 +129,7 @@ export async function ensureValidAccessToken(session) {
 
   if (!session.atlassian.refreshToken) {
     session.atlassian = null;
-    throw buildError("Atlassian session expired. Reconnect Atlassian.", 401);
+    throw buildError("Atlassian Rovo MCP session expired. Reconnect Atlassian.", 401);
   }
 
   try {
@@ -130,7 +137,7 @@ export async function ensureValidAccessToken(session) {
     return session.atlassian.accessToken;
   } catch (error) {
     session.atlassian = null;
-    throw buildError("Atlassian session refresh failed. Reconnect Atlassian.", 401, {
+    throw buildError("Atlassian Rovo MCP session refresh failed. Reconnect Atlassian.", 401, {
       cause: error.details ?? error.message,
     });
   }

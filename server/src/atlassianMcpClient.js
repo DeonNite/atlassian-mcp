@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+import { fetchAccessibleResources } from "./atlassianApi.js";
 import { config } from "./config.js";
 import { buildError } from "./http.js";
 
@@ -135,6 +136,10 @@ const STABLE_ALIAS_TOOLS = {
 const MUTATING_TOOL_PATTERN =
   /\b(create|update|delete|remove|archive|move|assign|transition|comment|link|unlink|upload|attach|publish)\b/i;
 
+const EXCLUDED_DYNAMIC_TOOL_NAMES = new Set([
+  "searchAtlassian",
+  "getAccessibleAtlassianResources",
+]);
 function normalizeToolsResponse(response) {
   if (Array.isArray(response)) {
     return response;
@@ -234,6 +239,46 @@ function filterArgsForSchema(args, inputSchema) {
       ([key, value]) => allowedKeys.has(key) && shouldKeepValue(value),
     ),
   );
+}
+
+function normalizeCloudTarget(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "")
+    .replace(/\/+$/, "");
+}
+
+function looksLikeCloudDomain(value) {
+  return normalizeCloudTarget(value).includes(".");
+}
+
+async function resolveCloudIdArg(accessToken, args) {
+  const requestedCloudId =
+    typeof args?.cloudId === "string" ? args.cloudId.trim() : "";
+
+  if (!requestedCloudId || !looksLikeCloudDomain(requestedCloudId)) {
+    return args;
+  }
+
+  const normalizedTarget = normalizeCloudTarget(requestedCloudId);
+  const resources = await fetchAccessibleResources(accessToken);
+  const matchingResource = resources.find((resource) => {
+    const resourceId = String(resource.id ?? "").trim().toLowerCase();
+    const resourceUrl = normalizeCloudTarget(resource.url);
+
+    return resourceId === normalizedTarget || resourceUrl === normalizedTarget;
+  });
+
+  if (!matchingResource?.id) {
+    return args;
+  }
+
+  return {
+    ...args,
+    cloudId: matchingResource.id,
+  };
 }
 
 function scalarTypeForEnum(enumValues) {
@@ -513,6 +558,10 @@ export function buildOpenAiToolRegistry(availableTools = []) {
       continue;
     }
 
+    if (EXCLUDED_DYNAMIC_TOOL_NAMES.has(String(tool.name).trim())) {
+      continue;
+    }
+
     if (mappedActualToolNames.has(String(tool.name).toLowerCase())) {
       continue;
     }
@@ -571,7 +620,8 @@ export async function callAtlassianTool(
                 return resolveAliasTool(identifier, tools);
               }
             })();
-    const filteredArgs = filterArgsForSchema(args, tool.inputSchema);
+    const resolvedArgs = await resolveCloudIdArg(accessToken, args);
+    const filteredArgs = filterArgsForSchema(resolvedArgs, tool.inputSchema);
 
     const result = await client.callTool({
       name: tool.name,
@@ -586,3 +636,7 @@ export async function callAtlassianTool(
     };
   });
 }
+
+
+
+

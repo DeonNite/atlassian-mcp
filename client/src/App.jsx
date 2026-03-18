@@ -4,7 +4,7 @@ const INITIAL_MESSAGES = [
   {
     role: "assistant",
     content:
-      "Connect Atlassian, lock onto a cloud site, then ask me to read or act across Jira and Confluence. I will use the stable helper tools first and fall back to any additional MCP tools your Atlassian session exposes.",
+      "Connect Atlassian Rovo MCP, lock onto a cloud site, then ask me to read or act across Jira and Confluence. I will use the stable helper tools first and fall back to any additional MCP tools your Atlassian session exposes.",
   },
 ];
 
@@ -56,14 +56,61 @@ function usePersistedCloudId() {
   return [cloudId, setCloudId];
 }
 
+function normalizeCloudTarget(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "")
+    .replace(/\/+$/, "");
+}
+
+function findResourceForCloudTarget(value, resources) {
+  const normalizedValue = String(value ?? "").trim();
+
+  if (!normalizedValue) {
+    return null;
+  }
+
+  const loweredValue = normalizedValue.toLowerCase();
+  const normalizedTarget = normalizeCloudTarget(normalizedValue);
+
+  return (
+    resources.find((resource) => {
+      const resourceId = String(resource.id ?? "").trim().toLowerCase();
+      const resourceUrl = String(resource.url ?? "").trim().toLowerCase();
+
+      return (
+        resourceId === loweredValue ||
+        resourceUrl === loweredValue ||
+        normalizeCloudTarget(resource.url) === normalizedTarget
+      );
+    }) ?? null
+  );
+}
+
+function resolveCloudId(value, resources) {
+  const normalizedValue = String(value ?? "").trim();
+
+  if (!normalizedValue) {
+    return "";
+  }
+
+  return findResourceForCloudTarget(normalizedValue, resources)?.id ?? normalizedValue;
+}
+
+function looksLikeSiteDomain(value) {
+  return normalizeCloudTarget(value).includes(".");
+}
+
 function buildWorkflowSteps({ connected, activeCloudId, hasConversation, busy }) {
   return [
     {
       label: "Authorize",
-      title: connected ? "Atlassian connected" : "Connect Atlassian",
+      title: connected ? "Rovo MCP connected" : "Connect Atlassian",
       detail: connected
-        ? "OAuth session is active and the backend can call Atlassian."
-        : "Start the Atlassian OAuth flow from the setup rail.",
+        ? "OAuth 2.1 session is active and the backend can call Atlassian Rovo MCP."
+        : "Start the Atlassian Rovo MCP OAuth 2.1 flow from the setup rail.",
       state: connected ? "done" : "active",
     },
     {
@@ -92,6 +139,7 @@ export default function App() {
     model: "",
     hasConversation: false,
     activeCloudId: null,
+    lastOauthCallback: null,
   });
   const [resources, setResources] = useState([]);
   const [cloudId, setCloudId] = usePersistedCloudId();
@@ -111,9 +159,17 @@ export default function App() {
     [resources],
   );
 
-  const activeCloudId = status.activeCloudId || cloudId || "";
+  const resolvedCloudId = useMemo(() => resolveCloudId(cloudId, resources), [
+    cloudId,
+    resources,
+  ]);
+  const resolvedStatusCloudId = useMemo(
+    () => resolveCloudId(status.activeCloudId, resources),
+    [status.activeCloudId, resources],
+  );
+  const activeCloudId = resolvedStatusCloudId || resolvedCloudId || "";
   const chatReadiness = !status.connected
-    ? "Connect Atlassian to unlock the workspace."
+    ? "Connect Atlassian Rovo MCP to unlock the workspace."
     : activeCloudId
       ? `Requests will target ${activeCloudId}.`
       : "Choose a cloud site so the assistant can scope Jira and Confluence calls.";
@@ -146,6 +202,24 @@ export default function App() {
       value: `${toolCalls.length}`,
     },
   ];
+  const oauthCallbackEntry = status.lastOauthCallback
+    ? {
+        name: "oauth2_callback",
+        toolName: "Atlassian OAuth 2.1 callback",
+        args: status.lastOauthCallback,
+        preview:
+          "Captured from /api/auth/atlassian/callback after the latest authorization attempt.",
+        error:
+          status.lastOauthCallback.result === "authorized"
+            ? null
+            : status.lastOauthCallback.error?.code ||
+              "OAuth callback reported a failure.",
+        isOauthCallback: true,
+      }
+    : null;
+  const runLogEntries = oauthCallbackEntry
+    ? [oauthCallbackEntry, ...toolCalls]
+    : toolCalls;
 
   async function loadStatus() {
     const payload = await apiFetch("/api/auth/status", { method: "GET" });
@@ -201,6 +275,22 @@ export default function App() {
       });
   }, []);
 
+  useEffect(() => {
+    if (cloudId && resolvedCloudId && resolvedCloudId !== cloudId) {
+      setCloudId(resolvedCloudId);
+    }
+  }, [cloudId, resolvedCloudId, setCloudId]);
+  useEffect(() => {
+    if (!status.lastOauthCallback) {
+      return;
+    }
+
+    console.log(
+      "Atlassian OAuth 2.1 callback response:",
+      status.lastOauthCallback,
+    );
+  }, [status.lastOauthCallback]);
+
   function handleConnect() {
     window.location.href = "/api/auth/atlassian/start";
   }
@@ -220,6 +310,7 @@ export default function App() {
         expiresAt: null,
         hasConversation: false,
         activeCloudId: null,
+        lastOauthCallback: null,
       }));
       setResources([]);
       setToolCalls([]);
@@ -283,11 +374,19 @@ export default function App() {
     setDraft("");
 
     try {
+      const requestCloudId = resolveCloudId(cloudId, resources);
+
+      if (requestCloudId && looksLikeSiteDomain(requestCloudId)) {
+        throw new Error(
+          "Select a discovered site or enter the Atlassian cloud ID instead of the site domain.",
+        );
+      }
+
       const payload = await apiFetch("/api/chat", {
         method: "POST",
         body: JSON.stringify({
           message: userMessage.content,
-          cloudId: cloudId || undefined,
+          cloudId: requestCloudId || undefined,
         }),
       });
 
@@ -304,7 +403,7 @@ export default function App() {
       setStatus((current) => ({
         ...current,
         hasConversation: true,
-        activeCloudId: cloudId || current.activeCloudId,
+        activeCloudId: requestCloudId || current.activeCloudId,
       }));
     } catch (requestError) {
       setMessages((current) => [
@@ -332,7 +431,7 @@ export default function App() {
             <h1>Operate Jira and Confluence from one workspace.</h1>
             <p className="hero-copy">
               This UI is structured around the real workflow in this project:
-              authenticate against Atlassian, scope the session to a cloud site,
+              authenticate against Atlassian Rovo MCP, scope the session to a cloud site,
               chat with the OpenAI-backed assistant, and inspect every MCP tool
               call the backend executes.
             </p>
@@ -384,7 +483,7 @@ export default function App() {
               <div className="panel-heading">
                 <div>
                   <p className="panel-kicker">Connection</p>
-                  <h2>Atlassian auth</h2>
+                  <h2>Rovo MCP auth</h2>
                 </div>
                 <span className={status.connected ? "status-pill ok" : "status-pill"}>
                   {status.connected ? "Connected" : "Disconnected"}
@@ -404,7 +503,7 @@ export default function App() {
 
               <div className="button-row">
                 <button className="primary-button" onClick={handleConnect} disabled={busy}>
-                  Connect Atlassian
+                  Connect Atlassian Rovo MCP
                 </button>
                 <button className="ghost-button" onClick={handleDisconnect} disabled={busy}>
                   Disconnect
@@ -558,11 +657,11 @@ export default function App() {
                   <p className="panel-kicker">Execution</p>
                   <h2>Run log</h2>
                 </div>
-                <span className="status-pill">{toolCalls.length} entries</span>
+                <span className="status-pill">{runLogEntries.length} entries</span>
               </div>
 
               <div className="tool-list">
-                {toolCalls.length === 0 ? (
+                {runLogEntries.length === 0 ? (
                   <div className="empty-state">
                     <strong>No tool activity yet</strong>
                     <p>
@@ -571,13 +670,21 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  toolCalls.map((toolCall, index) => (
+                  runLogEntries.map((toolCall, index) => (
                     <div className="tool-card" key={`${toolCall.name}-${index}`}>
                       <div className="tool-head">
                         <strong>{toolCall.name}</strong>
                         <span>{toolCall.toolName || "No MCP tool resolved"}</span>
                       </div>
-                      {toolCall.error ? (
+                      {toolCall.isOauthCallback ? (
+                        <>
+                          <pre>{JSON.stringify(toolCall.args, null, 2)}</pre>
+                          {toolCall.error ? (
+                            <p className="tool-error">{toolCall.error}</p>
+                          ) : null}
+                          <p>{toolCall.preview}</p>
+                        </>
+                      ) : toolCall.error ? (
                         <p className="tool-error">{toolCall.error}</p>
                       ) : (
                         <>
@@ -624,3 +731,7 @@ export default function App() {
     </div>
   );
 }
+
+
+
+

@@ -33,6 +33,7 @@ function buildInstructions(defaultCloudId, toolRegistry) {
     "For Confluence searches, generate valid CQL from the user's request.",
     mutatingToolsLine,
     "When a tool returns structured data, summarize the most important details instead of dumping raw JSON unless the user asks for raw output.",
+    "If a tool call fails and a cloudId was already provided, do not ask for the Jira site URL again. Explain the tool error and suggest retrying or reconnecting Atlassian.",
   ].join(" ");
 }
 
@@ -125,7 +126,10 @@ async function executeTool(
 
   return {
     name,
-    args: normalizedArgs,
+    args:
+      mcpResult.input && typeof mcpResult.input === "object"
+        ? mcpResult.input
+        : normalizedArgs,
     mcpResult,
   };
 }
@@ -257,3 +261,8 @@ export async function generateChatResponse({
     toolCalls,
   };
 }
+
+
+
+
+

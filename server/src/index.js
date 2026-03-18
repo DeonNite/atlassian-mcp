@@ -99,6 +99,7 @@ app.get(
       model: config.openai.model,
       hasConversation: Boolean(req.session.chat.previousResponseId),
       activeCloudId: req.session.chat.activeCloudId,
+      lastOauthCallback: req.session.lastOauthCallback ?? null,
     });
   }),
 );
@@ -106,8 +107,16 @@ app.get(
 app.get(
   "/api/auth/atlassian/start",
   asyncRoute(async (req, res) => {
-    const authorizeUrl = buildAtlassianAuthorizeUrl(req.session);
-    res.redirect(authorizeUrl);
+    const authorizeUrl = await buildAtlassianAuthorizeUrl(req.session);
+
+    if (authorizeUrl) {
+      res.redirect(authorizeUrl);
+      return;
+    }
+
+    const redirectUrl = new URL(config.clientOrigin);
+    redirectUrl.searchParams.set("connected", "1");
+    res.redirect(redirectUrl.toString());
   }),
 );
 
@@ -115,8 +124,36 @@ app.get(
   "/api/auth/atlassian/callback",
   asyncRoute(async (req, res) => {
     const { code, state, error, error_description: errorDescription } = req.query;
+    const previewSecret = (value) => {
+      const normalized = String(value ?? "").trim();
+
+      if (!normalized) {
+        return null;
+      }
+
+      if (normalized.length <= 24) {
+        return normalized;
+      }
+
+      return `${normalized.slice(0, 12)}...${normalized.slice(-8)}`;
+    };
 
     if (error) {
+      req.session.lastOauthCallback = {
+        provider: "atlassian-rovo-mcp",
+        oauthVersion: "2.1",
+        receivedAt: new Date().toISOString(),
+        result: "authorization_error",
+        callback: {
+          code: previewSecret(code),
+          state: previewSecret(state),
+        },
+        error: {
+          code: `${error}`,
+          description: errorDescription ? `${errorDescription}` : null,
+        },
+      };
+
       const redirectUrl = new URL(config.clientOrigin);
       redirectUrl.searchParams.set("authError", `${error}`);
 
@@ -129,10 +166,59 @@ app.get(
     }
 
     if (!code || !state) {
-      throw buildError("Missing Atlassian OAuth callback parameters.", 400);
+      req.session.lastOauthCallback = {
+        provider: "atlassian-rovo-mcp",
+        oauthVersion: "2.1",
+        receivedAt: new Date().toISOString(),
+        result: "invalid_callback",
+        callback: {
+          code: previewSecret(code),
+          state: previewSecret(state),
+        },
+        error: {
+          code: "missing_callback_parameters",
+          description: "The callback did not include both code and state.",
+        },
+      };
+
+      throw buildError("Missing Atlassian Rovo MCP OAuth 2.1 callback parameters.", 400);
     }
 
-    await exchangeAuthorizationCode(req.session, `${code}`, `${state}`);
+    try {
+      await exchangeAuthorizationCode(req.session, `${code}`, `${state}`);
+      req.session.lastOauthCallback = {
+        provider: "atlassian-rovo-mcp",
+        oauthVersion: "2.1",
+        receivedAt: new Date().toISOString(),
+        result: "authorized",
+        callback: {
+          code: previewSecret(code),
+          state: previewSecret(state),
+        },
+        token: {
+          expiresAt: req.session.atlassian?.expiresAt ?? null,
+          hasRefreshToken: Boolean(req.session.atlassian?.refreshToken),
+        },
+      };
+    } catch (exchangeError) {
+      req.session.lastOauthCallback = {
+        provider: "atlassian-rovo-mcp",
+        oauthVersion: "2.1",
+        receivedAt: new Date().toISOString(),
+        result: "token_exchange_failed",
+        callback: {
+          code: previewSecret(code),
+          state: previewSecret(state),
+        },
+        error: {
+          code: exchangeError?.message ?? "Token exchange failed.",
+          description: exchangeError?.details ?? null,
+        },
+      };
+
+      throw exchangeError;
+    }
+
     clearConversation(req.session);
 
     const redirectUrl = new URL(config.clientOrigin);
@@ -257,3 +343,8 @@ app.listen(config.serverPort, () => {
     `Atlassian MCP demo server listening on http://localhost:${config.serverPort}`,
   );
 });
+
+
+
+
+
