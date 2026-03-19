@@ -10,31 +10,29 @@ const rootEnvPath = resolve(currentDir, "../../.env");
 dotenv.config({ path: rootEnvPath, quiet: true });
 dotenv.config({ quiet: true });
 
-const DEFAULT_ATLASSIAN_SCOPES = [
+const DEFAULT_SCOPES = [
   "read:jira-work",
   "write:jira-work",
   "search:confluence",
   "read:confluence-content.all",
+  "read:me",
+  "read:account",
+  "offline_access",
 ];
 
-function readEnv(name, { required = false, defaultValue = "" } = {}) {
-  const rawValue = process.env[name];
-  const normalizedValue = rawValue === undefined ? "" : String(rawValue).trim();
+function readEnv(name, { defaultValue = "", required = false } = {}) {
+  const raw = process.env[name];
+  const value = raw === undefined ? "" : String(raw).trim();
 
-  if (required && !normalizedValue) {
+  if (required && !value) {
     throw new Error(`Missing required environment variable: ${name}`);
   }
 
-  if (!normalizedValue) {
-    return String(defaultValue).trim();
-  }
-
-  return normalizedValue;
+  return value || String(defaultValue).trim();
 }
 
-function readNumber(name, defaultValue) {
-  const rawValue = process.env[name];
-  const parsed = Number.parseInt(rawValue ?? `${defaultValue}`, 10);
+function readNumber(name, fallback) {
+  const parsed = Number.parseInt(readEnv(name, { defaultValue: `${fallback}` }), 10);
 
   if (Number.isNaN(parsed)) {
     throw new Error(`Environment variable ${name} must be a number.`);
@@ -43,41 +41,38 @@ function readNumber(name, defaultValue) {
   return parsed;
 }
 
-function readBoolean(name, defaultValue = false) {
-  const rawValue = process.env[name];
+function readBoolean(name, fallback = false) {
+  const raw = process.env[name];
 
-  if (rawValue === undefined) {
-    return defaultValue;
+  if (raw === undefined) {
+    return fallback;
   }
 
-  return /^(1|true|yes|on)$/i.test(String(rawValue).trim());
+  return /^(1|true|yes|on)$/i.test(String(raw).trim());
 }
-function readScopes() {
-  const configuredScopes = readEnv("ATLASSIAN_SCOPES");
 
-  if (!configuredScopes) {
-    return DEFAULT_ATLASSIAN_SCOPES;
+function readScopes() {
+  const configured = readEnv("ATLASSIAN_SCOPES");
+
+  if (!configured) {
+    return DEFAULT_SCOPES;
   }
 
-  return configuredScopes
+  return configured
     .split(/[,\s]+/)
     .map((scope) => scope.trim())
     .filter(Boolean);
 }
 
-const serverPort = readNumber("SERVER_PORT", 3001);
+const serverPort = readNumber("SERVER_PORT", 3100);
 
 export const config = {
   isProduction: process.env.NODE_ENV === "production",
   serverPort,
   clientOrigin: readEnv("CLIENT_ORIGIN", {
-    defaultValue: "http://localhost:5173",
+    defaultValue: "http://localhost:5274",
   }),
   sessionCookieName: "atlassian_mcp_demo_sid",
-  openai: {
-    apiKey: readEnv("OPENAI_API_KEY", { required: true }),
-    model: readEnv("OPENAI_MODEL", { defaultValue: "gpt-5.4" }),
-  },
   atlassian: {
     clientId: readEnv("ATLASSIAN_CLIENT_ID", { required: true }),
     clientSecret: readEnv("ATLASSIAN_CLIENT_SECRET", { required: true }),
@@ -99,20 +94,7 @@ export const config = {
     mcpUrl: readEnv("ATLASSIAN_MCP_URL", {
       defaultValue: "https://mcp.atlassian.com/v1/mcp",
     }),
-    mcpToolMaxAttempts: Math.max(
-      1,
-      readNumber("ATLASSIAN_MCP_TOOL_MAX_ATTEMPTS", 2),
-    ),
-    mcpToolRetryDelayMs: Math.max(
-      0,
-      readNumber("ATLASSIAN_MCP_TOOL_RETRY_DELAY_MS", 400),
-    ),
     debugAuth: readBoolean("ATLASSIAN_DEBUG_AUTH", false),
     scopes: readScopes(),
   },
 };
-
-
-
-
-

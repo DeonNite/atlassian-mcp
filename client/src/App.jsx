@@ -1,20 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 
-const INITIAL_MESSAGES = [
-  {
-    role: "assistant",
-    content:
-      "Connect Atlassian Rovo MCP, lock onto a cloud site, then ask me to read or act across Jira and Confluence. I will use the stable helper tools first and fall back to any additional MCP tools your Atlassian session exposes.",
-  },
-];
-
-const QUICK_PROMPTS = [
-  "Search Jira for open bugs assigned to me and group them by priority.",
-  "Update DEMO-42 to In Progress and add a short implementation note.",
-  "Find the latest Confluence page about onboarding and summarize it.",
-  "Create a Jira task for documenting the Atlassian MCP integration rollout.",
-];
-
 async function apiFetch(path, options = {}) {
   const response = await fetch(path, {
     credentials: "include",
@@ -27,9 +12,7 @@ async function apiFetch(path, options = {}) {
 
   const payload = await response
     .json()
-    .catch(() => ({
-      error: `The server returned a non-JSON response for ${path}.`,
-    }));
+    .catch(() => ({ error: `Non-JSON response received for ${path}` }));
 
   if (!response.ok) {
     throw new Error(payload.error || "Request failed.");
@@ -38,22 +21,12 @@ async function apiFetch(path, options = {}) {
   return payload;
 }
 
-function formatExpiry(value) {
+function formatDate(value) {
   if (!value) {
-    return "Not connected";
+    return "N/A";
   }
 
   return new Date(value).toLocaleString();
-}
-
-function usePersistedCloudId() {
-  const [cloudId, setCloudId] = useState(() => localStorage.getItem("cloudId") ?? "");
-
-  useEffect(() => {
-    localStorage.setItem("cloudId", cloudId);
-  }, [cloudId]);
-
-  return [cloudId, setCloudId];
 }
 
 function normalizeCloudTarget(value) {
@@ -65,30 +38,6 @@ function normalizeCloudTarget(value) {
     .replace(/\/+$/, "");
 }
 
-function findResourceForCloudTarget(value, resources) {
-  const normalizedValue = String(value ?? "").trim();
-
-  if (!normalizedValue) {
-    return null;
-  }
-
-  const loweredValue = normalizedValue.toLowerCase();
-  const normalizedTarget = normalizeCloudTarget(normalizedValue);
-
-  return (
-    resources.find((resource) => {
-      const resourceId = String(resource.id ?? "").trim().toLowerCase();
-      const resourceUrl = String(resource.url ?? "").trim().toLowerCase();
-
-      return (
-        resourceId === loweredValue ||
-        resourceUrl === loweredValue ||
-        normalizeCloudTarget(resource.url) === normalizedTarget
-      );
-    }) ?? null
-  );
-}
-
 function resolveCloudId(value, resources) {
   const normalizedValue = String(value ?? "").trim();
 
@@ -96,130 +45,58 @@ function resolveCloudId(value, resources) {
     return "";
   }
 
-  return findResourceForCloudTarget(normalizedValue, resources)?.id ?? normalizedValue;
+  const normalizedTarget = normalizeCloudTarget(normalizedValue);
+  const matched = resources.find((resource) => {
+    const id = String(resource.id ?? "").trim().toLowerCase();
+    const url = normalizeCloudTarget(resource.url);
+    return id === normalizedTarget || url === normalizedTarget;
+  });
+
+  return matched?.id ?? normalizedValue;
 }
 
-function looksLikeSiteDomain(value) {
-  return normalizeCloudTarget(value).includes(".");
-}
-
-function buildWorkflowSteps({ connected, activeCloudId, hasConversation, busy }) {
-  return [
-    {
-      label: "Authorize",
-      title: connected ? "Rovo MCP connected" : "Connect Atlassian",
-      detail: connected
-        ? "OAuth 2.1 session is active and the backend can call Atlassian Rovo MCP."
-        : "Start the Atlassian Rovo MCP OAuth 2.1 flow from the setup rail.",
-      state: connected ? "done" : "active",
-    },
-    {
-      label: "Scope",
-      title: activeCloudId ? "Site selected" : "Pick a cloud site",
-      detail: activeCloudId
-        ? `Current target: ${activeCloudId}`
-        : "Choose a discovered site or paste a cloud ID manually.",
-      state: activeCloudId ? "done" : connected ? "active" : "pending",
-    },
-    {
-      label: "Operate",
-      title: hasConversation ? "Conversation active" : "Run Jira and Confluence tasks",
-      detail: busy
-        ? "The model is executing a request now."
-        : "Use chat to search, create, update, and inspect Atlassian data.",
-      state: hasConversation ? "done" : activeCloudId ? "active" : "pending",
-    },
-  ];
+function prettyJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 export default function App() {
   const [status, setStatus] = useState({
     connected: false,
     expiresAt: null,
-    model: "",
-    hasConversation: false,
+    hasRefreshToken: false,
     activeCloudId: null,
     lastOauthCallback: null,
   });
   const [resources, setResources] = useState([]);
-  const [cloudId, setCloudId] = usePersistedCloudId();
-  const [messages, setMessages] = useState(INITIAL_MESSAGES);
-  const [draft, setDraft] = useState("");
-  const [toolCalls, setToolCalls] = useState([]);
+  const [tools, setTools] = useState([]);
+  const [cloudId, setCloudId] = useState(() => localStorage.getItem("cloudId") ?? "");
+  const [toolName, setToolName] = useState("");
+  const [toolArgsText, setToolArgsText] = useState("{\n  \n}");
+  const [runLog, setRunLog] = useState([]);
   const [busy, setBusy] = useState(false);
-  const [loadingResources, setLoadingResources] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const resourceOptions = useMemo(
-    () =>
-      resources.map((resource) => ({
-        label: `${resource.name} (${resource.id})`,
-        value: resource.id,
-      })),
-    [resources],
+  const resolvedCloudId = useMemo(
+    () => resolveCloudId(cloudId || status.activeCloudId, resources),
+    [cloudId, status.activeCloudId, resources],
   );
 
-  const resolvedCloudId = useMemo(() => resolveCloudId(cloudId, resources), [
-    cloudId,
-    resources,
-  ]);
-  const resolvedStatusCloudId = useMemo(
-    () => resolveCloudId(status.activeCloudId, resources),
-    [status.activeCloudId, resources],
+  const sortedTools = useMemo(
+    () =>
+      [...tools].sort((left, right) =>
+        String(left?.name ?? "").localeCompare(String(right?.name ?? "")),
+      ),
+    [tools],
   );
-  const activeCloudId = resolvedStatusCloudId || resolvedCloudId || "";
-  const chatReadiness = !status.connected
-    ? "Connect Atlassian Rovo MCP to unlock the workspace."
-    : activeCloudId
-      ? `Requests will target ${activeCloudId}.`
-      : "Choose a cloud site so the assistant can scope Jira and Confluence calls.";
-  const readinessPill = !status.connected
-    ? "Disconnected"
-    : activeCloudId
-      ? "Ready"
-      : "Select site";
-  const workflowSteps = buildWorkflowSteps({
-    connected: status.connected,
-    activeCloudId,
-    hasConversation: status.hasConversation,
-    busy,
-  });
-  const heroStats = [
-    {
-      label: "Model",
-      value: status.model || "Unavailable",
-    },
-    {
-      label: "Sites",
-      value: `${resourceOptions.length}`,
-    },
-    {
-      label: "Messages",
-      value: `${messages.length}`,
-    },
-    {
-      label: "Tool calls",
-      value: `${toolCalls.length}`,
-    },
-  ];
-  const oauthCallbackEntry = status.lastOauthCallback
-    ? {
-        name: "oauth2_callback",
-        toolName: "Atlassian OAuth 2.1 callback",
-        args: status.lastOauthCallback,
-        preview:
-          "Captured from /api/auth/atlassian/callback after the latest authorization attempt.",
-        error:
-          status.lastOauthCallback.result === "authorized"
-            ? null
-            : status.lastOauthCallback.error?.code ||
-              "OAuth callback reported a failure.",
-        isOauthCallback: true,
-      }
-    : null;
-  const runLogEntries = oauthCallbackEntry
-    ? [oauthCallbackEntry, ...toolCalls]
-    : toolCalls;
+
+  useEffect(() => {
+    localStorage.setItem("cloudId", cloudId);
+  }, [cloudId]);
 
   async function loadStatus() {
     const payload = await apiFetch("/api/auth/status", { method: "GET" });
@@ -228,15 +105,37 @@ export default function App() {
   }
 
   async function loadResources() {
-    setLoadingResources(true);
+    const payload = await apiFetch("/api/atlassian/resources", { method: "GET" });
+    setResources(Array.isArray(payload.resources) ? payload.resources : []);
+  }
+
+  async function loadTools() {
+    const payload = await apiFetch("/api/mcp/tools", { method: "GET" });
+    const list = Array.isArray(payload.tools) ? payload.tools : [];
+    setTools(list);
+
+    if (!toolName && list.length > 0) {
+      setToolName(list[0].name);
+    }
+  }
+
+  async function refreshWorkspace() {
+    setLoading(true);
+    setError("");
 
     try {
-      const payload = await apiFetch("/api/atlassian/resources", {
-        method: "GET",
-      });
-      setResources(payload.resources ?? []);
+      const authStatus = await loadStatus();
+
+      if (authStatus.connected) {
+        await Promise.all([loadResources(), loadTools()]);
+      } else {
+        setResources([]);
+        setTools([]);
+      }
+    } catch (requestError) {
+      setError(requestError.message);
     } finally {
-      setLoadingResources(false);
+      setLoading(false);
     }
   }
 
@@ -262,34 +161,8 @@ export default function App() {
       window.history.replaceState({}, "", url);
     }
 
-    loadStatus()
-      .then((payload) => {
-        if (payload.connected) {
-          return loadResources();
-        }
-
-        return undefined;
-      })
-      .catch((loadError) => {
-        setError(loadError.message);
-      });
+    refreshWorkspace();
   }, []);
-
-  useEffect(() => {
-    if (cloudId && resolvedCloudId && resolvedCloudId !== cloudId) {
-      setCloudId(resolvedCloudId);
-    }
-  }, [cloudId, resolvedCloudId, setCloudId]);
-  useEffect(() => {
-    if (!status.lastOauthCallback) {
-      return;
-    }
-
-    console.log(
-      "Atlassian OAuth 2.1 callback response:",
-      status.lastOauthCallback,
-    );
-  }, [status.lastOauthCallback]);
 
   function handleConnect() {
     window.location.href = "/api/auth/atlassian/start";
@@ -304,46 +177,16 @@ export default function App() {
         method: "POST",
         body: JSON.stringify({}),
       });
-      setStatus((current) => ({
-        ...current,
+      setStatus({
         connected: false,
         expiresAt: null,
-        hasConversation: false,
+        hasRefreshToken: false,
         activeCloudId: null,
         lastOauthCallback: null,
-      }));
-      setResources([]);
-      setToolCalls([]);
-      setMessages(INITIAL_MESSAGES);
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleRefreshResources() {
-    setError("");
-
-    try {
-      await loadResources();
-    } catch (requestError) {
-      setError(requestError.message);
-    }
-  }
-
-  async function handleResetConversation() {
-    setBusy(true);
-    setError("");
-
-    try {
-      await apiFetch("/api/chat/reset", {
-        method: "POST",
-        body: JSON.stringify({}),
       });
-      setMessages(INITIAL_MESSAGES);
-      setToolCalls([]);
-      await loadStatus();
+      setResources([]);
+      setTools([]);
+      setRunLog([]);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -351,393 +194,207 @@ export default function App() {
     }
   }
 
-  function handleQuickPrompt(prompt) {
-    setDraft(prompt);
-  }
-
-  async function handleSubmit(event) {
-    event.preventDefault();
-
-    if (!draft.trim()) {
+  async function handleInvokeTool() {
+    if (!toolName.trim()) {
+      setError("Enter or select a tool name.");
       return;
     }
 
     setBusy(true);
     setError("");
 
-    const userMessage = {
-      role: "user",
-      content: draft.trim(),
-    };
-
-    setMessages((current) => [...current, userMessage]);
-    setDraft("");
-
     try {
-      const requestCloudId = resolveCloudId(cloudId, resources);
+      let parsedArgs = {};
 
-      if (requestCloudId && looksLikeSiteDomain(requestCloudId)) {
-        throw new Error(
-          "Select a discovered site or enter the Atlassian cloud ID instead of the site domain.",
-        );
+      if (toolArgsText.trim()) {
+        parsedArgs = JSON.parse(toolArgsText);
       }
 
-      const payload = await apiFetch("/api/chat", {
+      if (!parsedArgs || typeof parsedArgs !== "object" || Array.isArray(parsedArgs)) {
+        throw new Error("Tool args must be a JSON object.");
+      }
+
+      if (resolvedCloudId && !parsedArgs.cloudId) {
+        parsedArgs.cloudId = resolvedCloudId;
+      }
+
+      const payload = await apiFetch("/api/mcp/call", {
         method: "POST",
         body: JSON.stringify({
-          message: userMessage.content,
-          cloudId: requestCloudId || undefined,
+          name: toolName.trim(),
+          args: parsedArgs,
         }),
       });
 
-      setMessages((current) => [
-        ...current,
+      setRunLog((current) => [
         {
-          role: "assistant",
-          content:
-            payload.text ||
-            "The model returned no text. Check the execution log for details.",
+          id: crypto.randomUUID(),
+          createdAt: new Date().toISOString(),
+          ok: true,
+          tool: payload.toolName ?? toolName,
+          input: payload.input ?? parsedArgs,
+          output: payload.result ?? payload,
         },
-      ]);
-      setToolCalls(payload.toolCalls ?? []);
-      setStatus((current) => ({
         ...current,
-        hasConversation: true,
-        activeCloudId: requestCloudId || current.activeCloudId,
-      }));
+      ]);
+
+      if (typeof payload?.input?.cloudId === "string" && payload.input.cloudId) {
+        setCloudId(payload.input.cloudId);
+      }
     } catch (requestError) {
-      setMessages((current) => [
-        ...current,
+      const message = requestError.message || "Tool call failed.";
+      setError(message);
+      setRunLog((current) => [
         {
-          role: "assistant",
-          content: `Request failed: ${requestError.message}`,
+          id: crypto.randomUUID(),
+          createdAt: new Date().toISOString(),
+          ok: false,
+          tool: toolName,
+          input: toolArgsText,
+          output: { error: message },
         },
+        ...current,
       ]);
-      setError(requestError.message);
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="app-shell">
-      <div className="ambient ambient-left" />
-      <div className="ambient ambient-right" />
+    <main className="page">
+      <section className="panel">
+        <h1>Atlassian Rovo MCP OAuth 2.1 Scaffold</h1>
+        <p>
+          Fresh scaffold focused on OAuth 2.1 (3LO), refresh token support, and
+          direct MCP tool execution.
+        </p>
 
-      <main className="layout">
-        <section className="hero">
-          <div className="hero-copy-block">
-            <p className="eyebrow">Atlassian MCP + OpenAI</p>
-            <h1>Operate Jira and Confluence from one workspace.</h1>
-            <p className="hero-copy">
-              This UI is structured around the real workflow in this project:
-              authenticate against Atlassian Rovo MCP, scope the session to a cloud site,
-              chat with the OpenAI-backed assistant, and inspect every MCP tool
-              call the backend executes.
-            </p>
+        <div className="row">
+          <button onClick={handleConnect} disabled={busy || loading}>
+            Connect Atlassian
+          </button>
+          <button onClick={handleDisconnect} disabled={busy || loading}>
+            Disconnect
+          </button>
+          <button onClick={refreshWorkspace} disabled={busy || loading}>
+            {loading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+
+        {error ? <div className="error">{error}</div> : null}
+
+        <div className="grid two">
+          <div className="card">
+            <h2>Auth status</h2>
+            <p>Connected: {status.connected ? "Yes" : "No"}</p>
+            <p>Token expiry: {formatDate(status.expiresAt)}</p>
+            <p>Has refresh token: {status.hasRefreshToken ? "Yes" : "No"}</p>
+            <p>Active cloudId: {status.activeCloudId || "N/A"}</p>
           </div>
 
-          <div className="hero-sidecard">
-            <p className="panel-kicker">Run status</p>
-            <h2>{readinessPill === "Ready" ? "Workspace armed" : "Setup in progress"}</h2>
-            <p className="panel-note">{chatReadiness}</p>
+          <div className="card">
+            <h2>OAuth callback snapshot</h2>
+            <pre>{prettyJson(status.lastOauthCallback ?? { message: "No callback yet." })}</pre>
+          </div>
+        </div>
+      </section>
 
-            <div className="hero-stat-grid">
-              {heroStats.map((stat) => (
-                <div className="hero-stat" key={stat.label}>
-                  <span>{stat.label}</span>
-                  <strong>{stat.value}</strong>
-                </div>
+      <section className="panel">
+        <h2>Scope target</h2>
+        <div className="grid two">
+          <div className="card">
+            <label htmlFor="resource-select">Discovered site</label>
+            <select
+              id="resource-select"
+              value={cloudId}
+              onChange={(event) => setCloudId(event.target.value)}
+            >
+              <option value="">Select a site</option>
+              {resources.map((resource) => (
+                <option key={`${resource.id}-${resource.url}`} value={resource.id}>
+                  {resource.name} ({resource.id})
+                </option>
               ))}
-            </div>
+            </select>
           </div>
-        </section>
 
-        <section className="workflow-strip">
-          {workflowSteps.map((step, index) => (
-            <article className="workflow-step" data-state={step.state} key={step.label}>
-              <span className="workflow-index">0{index + 1}</span>
-              <div>
-                <p>{step.label}</p>
-                <h2>{step.title}</h2>
-                <span>{step.detail}</span>
-              </div>
-            </article>
-          ))}
-        </section>
+          <div className="card">
+            <label htmlFor="cloudid-input">Manual cloudId or domain</label>
+            <input
+              id="cloudid-input"
+              value={cloudId}
+              onChange={(event) => setCloudId(event.target.value)}
+              placeholder="e.g. 12345678-abcd-1234-abcd-1234567890ab"
+            />
+            <p>Resolved cloudId: {resolvedCloudId || "N/A"}</p>
+          </div>
+        </div>
+      </section>
 
-        {error ? <div className="error-banner">{error}</div> : null}
+      <section className="panel">
+        <h2>Tool execution</h2>
+        <div className="grid two">
+          <div className="card">
+            <label htmlFor="tool-select">Tool</label>
+            <select
+              id="tool-select"
+              value={toolName}
+              onChange={(event) => setToolName(event.target.value)}
+            >
+              <option value="">Select tool</option>
+              {sortedTools.map((tool) => (
+                <option key={tool.name} value={tool.name}>
+                  {tool.name}
+                </option>
+              ))}
+            </select>
 
-        <section className="workspace-grid">
-          <aside className="rail setup-rail">
-            <article className="panel panel-emphasis">
-              <p className="panel-kicker">Mission control</p>
-              <h2>Prepare the session</h2>
-              <p className="panel-note">
-                Keep setup on the left so the center workspace stays focused on
-                conversations and outputs.
-              </p>
-            </article>
+            <label htmlFor="tool-name-manual">Or type tool name manually</label>
+            <input
+              id="tool-name-manual"
+              value={toolName}
+              onChange={(event) => setToolName(event.target.value)}
+              placeholder="searchJiraIssuesUsingJql"
+            />
 
-            <article className="panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="panel-kicker">Connection</p>
-                  <h2>Rovo MCP auth</h2>
-                </div>
-                <span className={status.connected ? "status-pill ok" : "status-pill"}>
-                  {status.connected ? "Connected" : "Disconnected"}
-                </span>
-              </div>
+            <label htmlFor="args">Args JSON</label>
+            <textarea
+              id="args"
+              rows={12}
+              value={toolArgsText}
+              onChange={(event) => setToolArgsText(event.target.value)}
+            />
 
-              <div className="metric-stack">
-                <div className="metric-card">
-                  <span>Token expiry</span>
-                  <strong>{formatExpiry(status.expiresAt)}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>Conversation</span>
-                  <strong>{status.hasConversation ? "Active" : "Not started"}</strong>
-                </div>
-              </div>
+            <button onClick={handleInvokeTool} disabled={busy || loading || !status.connected}>
+              {busy ? "Running..." : "Run tool"}
+            </button>
+          </div>
 
-              <div className="button-row">
-                <button className="primary-button" onClick={handleConnect} disabled={busy}>
-                  Connect Atlassian Rovo MCP
-                </button>
-                <button className="ghost-button" onClick={handleDisconnect} disabled={busy}>
-                  Disconnect
-                </button>
-              </div>
-            </article>
+          <div className="card">
+            <h3>Loaded tools ({tools.length})</h3>
+            <pre>{prettyJson(sortedTools.map((tool) => tool.name))}</pre>
+          </div>
+        </div>
+      </section>
 
-            <article className="panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="panel-kicker">Scope</p>
-                  <h2>Cloud site</h2>
-                </div>
-                <button
-                  className="ghost-button slim"
-                  onClick={handleRefreshResources}
-                  disabled={!status.connected || loadingResources}
-                >
-                  {loadingResources ? "Loading..." : "Refresh"}
-                </button>
-              </div>
-
-              <label className="field">
-                <span>Select a discovered site</span>
-                <select
-                  value={cloudId}
-                  onChange={(event) => setCloudId(event.target.value)}
-                  disabled={!status.connected || resourceOptions.length === 0}
-                >
-                  <option value="">
-                    {resourceOptions.length > 0
-                      ? "Choose a cloud site"
-                      : "No sites loaded yet"}
-                  </option>
-                  {resourceOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="field">
-                <span>Or enter cloudId manually</span>
-                <input
-                  value={cloudId}
-                  onChange={(event) => setCloudId(event.target.value)}
-                  placeholder="e.g. 12345678-abcd-1234-abcd-1234567890ab"
-                />
-              </label>
-
-              <div className="metric-card metric-inline">
-                <span>Active target</span>
-                <strong>{activeCloudId || "Not selected"}</strong>
-              </div>
-            </article>
-
-            <article className="panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="panel-kicker">Jump start</p>
-                  <h2>Quick asks</h2>
-                </div>
-              </div>
-
-              <div className="prompt-list">
-                {QUICK_PROMPTS.map((prompt) => (
-                  <button
-                    className="prompt-chip"
-                    key={prompt}
-                    onClick={() => handleQuickPrompt(prompt)}
-                    disabled={busy}
-                    type="button"
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
-            </article>
-          </aside>
-
-          <section className="conversation-column">
-            <article className="panel chat-panel">
-              <div className="panel-heading panel-heading-spread">
-                <div>
-                  <p className="panel-kicker">Conversation</p>
-                  <h2>Atlassian operator</h2>
-                  <p className="panel-note">{chatReadiness}</p>
-                </div>
-
-                <div className="button-row compact-row">
-                  <span className={activeCloudId ? "status-pill ok" : "status-pill"}>
-                    {readinessPill}
-                  </span>
-                  <button
-                    className="ghost-button slim"
-                    onClick={handleResetConversation}
-                    disabled={busy}
-                  >
-                    Reset chat
-                  </button>
-                </div>
-              </div>
-
-              <div className="messages">
-                {messages.map((message, index) => (
-                  <div
-                    key={`${message.role}-${index}`}
-                    className={`message ${message.role}`}
-                  >
-                    <span className="message-role">{message.role}</span>
-                    <p>{message.content}</p>
-                  </div>
-                ))}
-              </div>
-
-              <form className="composer" onSubmit={handleSubmit}>
-                <div className="composer-meta">
-                  <span>Selected site</span>
-                  <strong>{activeCloudId || "Choose one before issuing scoped work"}</strong>
-                </div>
-
-                <textarea
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  placeholder="Ask for Jira search, issue creation, issue updates, Confluence lookup, or any other Atlassian action your MCP session exposes."
-                  rows={5}
-                  disabled={busy}
-                />
-
-                <div className="button-row composer-actions">
-                  <button
-                    className="primary-button"
-                    type="submit"
-                    disabled={busy || !status.connected}
-                  >
-                    {busy ? "Working..." : "Send request"}
-                  </button>
-                  <span className="composer-note">
-                    Every tool invocation is logged in the execution rail.
-                  </span>
-                </div>
-              </form>
-            </article>
-          </section>
-
-          <aside className="rail activity-rail">
-            <article className="panel tool-panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="panel-kicker">Execution</p>
-                  <h2>Run log</h2>
-                </div>
-                <span className="status-pill">{runLogEntries.length} entries</span>
-              </div>
-
-              <div className="tool-list">
-                {runLogEntries.length === 0 ? (
-                  <div className="empty-state">
-                    <strong>No tool activity yet</strong>
-                    <p>
-                      Once you send a request, the resolved MCP tool names,
-                      arguments, previews, and any failures will appear here.
-                    </p>
-                  </div>
-                ) : (
-                  runLogEntries.map((toolCall, index) => (
-                    <div className="tool-card" key={`${toolCall.name}-${index}`}>
-                      <div className="tool-head">
-                        <strong>{toolCall.name}</strong>
-                        <span>{toolCall.toolName || "No MCP tool resolved"}</span>
-                      </div>
-                      {toolCall.isOauthCallback ? (
-                        <>
-                          <pre>{JSON.stringify(toolCall.args, null, 2)}</pre>
-                          {toolCall.error ? (
-                            <p className="tool-error">{toolCall.error}</p>
-                          ) : null}
-                          <p>{toolCall.preview}</p>
-                        </>
-                      ) : toolCall.error ? (
-                        <>
-                          <p className="tool-error">{toolCall.error}</p>
-                          {toolCall.details ? (
-                            <pre>{JSON.stringify(toolCall.details, null, 2)}</pre>
-                          ) : null}
-                        </>
-                      ) : (
-                        <>
-                          <pre>{JSON.stringify(toolCall.args, null, 2)}</pre>
-                          <p>{toolCall.preview}</p>
-                        </>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-            </article>
-
-            <article className="panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="panel-kicker">Snapshot</p>
-                  <h2>Session facts</h2>
-                </div>
-              </div>
-
-              <div className="metric-stack">
-                <div className="metric-card">
-                  <span>Model</span>
-                  <strong>{status.model || "Unavailable"}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>Loaded sites</span>
-                  <strong>{resourceOptions.length}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>Messages</span>
-                  <strong>{messages.length}</strong>
-                </div>
-                <div className="metric-card">
-                  <span>Last known cloud</span>
-                  <strong>{activeCloudId || "None"}</strong>
-                </div>
-              </div>
-            </article>
-          </aside>
-        </section>
-      </main>
-    </div>
+      <section className="panel">
+        <h2>Run log</h2>
+        {runLog.length === 0 ? (
+          <p>No runs yet.</p>
+        ) : (
+          <div className="stack">
+            {runLog.map((entry) => (
+              <article key={entry.id} className="card">
+                <p>
+                  <strong>{entry.ok ? "SUCCESS" : "FAILURE"}</strong> {entry.tool}
+                </p>
+                <p>{formatDate(entry.createdAt)}</p>
+                <pre>{prettyJson({ input: entry.input, output: entry.output })}</pre>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </main>
   );
 }
-
-
-
-
-

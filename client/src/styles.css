@@ -1,0 +1,110 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", sans-serif;
+  line-height: 1.4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f4f6fa;
+  color: #16263a;
+}
+
+.page {
+  margin: 0 auto;
+  max-width: 1200px;
+  padding: 24px;
+  display: grid;
+  gap: 16px;
+}
+
+.panel {
+  background: white;
+  border: 1px solid #d7dce5;
+  border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.grid {
+  display: grid;
+  gap: 12px;
+}
+
+.grid.two {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.card {
+  border: 1px solid #e0e6f0;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fbfcfe;
+  display: grid;
+  gap: 8px;
+}
+
+.stack {
+  display: grid;
+  gap: 10px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+button {
+  border: 1px solid #1d4ed8;
+  background: #1d4ed8;
+  color: white;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #90a4d4;
+  border-color: #90a4d4;
+  cursor: not-allowed;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid #b8c4d8;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  background: white;
+}
+
+textarea {
+  font-family: "Cascadia Mono", "Consolas", monospace;
+}
+
+.error {
+  border: 1px solid #f3b0b0;
+  background: #ffe7e7;
+  color: #811d1d;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+pre {
+  margin: 0;
+  overflow: auto;
+  border: 1px solid #d9e1ec;
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 10px;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12px;
+}

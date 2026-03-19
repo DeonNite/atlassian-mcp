@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const sessions = new Map();
 
 function buildEmptySession() {
@@ -10,14 +10,11 @@ function buildEmptySession() {
     oauth: null,
     atlassian: null,
     lastOauthCallback: null,
-    chat: {
-      previousResponseId: null,
-      activeCloudId: null,
-    },
+    activeCloudId: null,
   };
 }
 
-function purgeExpiredSessions() {
+function cleanupExpiredSessions() {
   const now = Date.now();
 
   for (const [sessionId, session] of sessions.entries()) {
@@ -28,17 +25,15 @@ function purgeExpiredSessions() {
 }
 
 export function createSession() {
-  purgeExpiredSessions();
-
+  cleanupExpiredSessions();
   const sessionId = randomUUID();
   const session = buildEmptySession();
   sessions.set(sessionId, session);
-
   return { sessionId, session };
 }
 
 export function getSession(sessionId) {
-  purgeExpiredSessions();
+  cleanupExpiredSessions();
 
   if (!sessionId) {
     return null;
@@ -53,19 +48,9 @@ export function getSession(sessionId) {
   return session;
 }
 
-export function clearConversation(session) {
-  session.chat = {
-    previousResponseId: null,
-    activeCloudId: null,
-  };
-}
-
 export function clearAtlassianSession(session) {
   session.oauth = null;
   session.atlassian = null;
   session.lastOauthCallback = null;
-  clearConversation(session);
+  session.activeCloudId = null;
 }
-
-
-

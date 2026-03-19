@@ -30,14 +30,14 @@ function logAuthDebug(event, details = {}) {
 
 function normalizeTokenPayload(payload) {
   if (!payload.access_token) {
-    throw buildError("Atlassian Rovo MCP OAuth 2.1 did not return an access token.");
+    throw buildError("OAuth token response did not include access_token.");
   }
-
-  console.log(`[atlassian-oauth] bearer token: Bearer ${payload.access_token}`);
 
   return {
     accessToken: payload.access_token,
     refreshToken: payload.refresh_token ?? null,
+    tokenType: payload.token_type ?? "Bearer",
+    scope: payload.scope ?? null,
     expiresAt: Date.now() + (payload.expires_in ?? 3600) * 1000,
   };
 }
@@ -46,10 +46,10 @@ async function requestToken(body) {
   logAuthDebug("token_request", {
     tokenUrl: config.atlassian.tokenUrl,
     grantType: body.grant_type ?? null,
-    hasClientSecret: Boolean(body.client_secret),
     hasCode: Boolean(body.code),
-    hasRefreshToken: Boolean(body.refresh_token),
     hasCodeVerifier: Boolean(body.code_verifier),
+    hasRefreshToken: Boolean(body.refresh_token),
+    hasClientSecret: Boolean(body.client_secret),
   });
 
   const response = await fetch(config.atlassian.tokenUrl, {
@@ -58,7 +58,13 @@ async function requestToken(body) {
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(Object.fromEntries(Object.entries(body ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== ""))),
+    body: JSON.stringify(
+      Object.fromEntries(
+        Object.entries(body).filter(
+          ([, value]) => value !== undefined && value !== null && value !== "",
+        ),
+      ),
+    ),
   });
 
   const payload = await response.json().catch(() => ({}));
@@ -66,15 +72,10 @@ async function requestToken(body) {
   if (!response.ok) {
     logAuthDebug("token_request_failed", {
       status: response.status,
-      error: payload?.error ?? null,
-      errorDescription: payload?.error_description ?? null,
+      payload,
     });
 
-    throw buildError(
-      "Atlassian Rovo MCP OAuth 2.1 token exchange failed.",
-      response.status,
-      payload,
-    );
+    throw buildError("OAuth token request failed.", response.status, payload);
   }
 
   logAuthDebug("token_request_succeeded", {
@@ -82,6 +83,7 @@ async function requestToken(body) {
     hasAccessToken: Boolean(payload?.access_token),
     hasRefreshToken: Boolean(payload?.refresh_token),
     expiresIn: payload?.expires_in ?? null,
+    scope: payload?.scope ?? null,
   });
 
   return normalizeTokenPayload(payload);
@@ -98,28 +100,28 @@ export async function buildAtlassianAuthorizeUrl(session) {
   };
 
   const query = new URLSearchParams({
+    audience: config.atlassian.oauthAudience,
     client_id: config.atlassian.clientId,
     scope: config.atlassian.scopes.join(" "),
     redirect_uri: config.atlassian.redirectUri,
-    response_type: "code",
     state,
+    response_type: "code",
+    prompt: config.atlassian.scopes.includes("offline_access")
+      ? "consent"
+      : "login",
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
   });
 
-  if (config.atlassian.oauthAudience) {
-    query.set("audience", config.atlassian.oauthAudience);
-  }
-
-  if (config.atlassian.scopes.includes("offline_access")) {
-    query.set("prompt", "consent");
+  if (!config.atlassian.oauthAudience) {
+    query.delete("audience");
   }
 
   logAuthDebug("authorize_url_created", {
     authorizeUrl: config.atlassian.authorizeUrl,
     redirectUri: config.atlassian.redirectUri,
-    hasAudience: Boolean(config.atlassian.oauthAudience),
     scopeCount: config.atlassian.scopes.length,
+    includesOfflineAccess: config.atlassian.scopes.includes("offline_access"),
   });
 
   return `${config.atlassian.authorizeUrl}?${query.toString()}`;
@@ -127,11 +129,11 @@ export async function buildAtlassianAuthorizeUrl(session) {
 
 export async function exchangeAuthorizationCode(session, code, returnedState) {
   if (!session.oauth?.state || !session.oauth?.codeVerifier) {
-    throw buildError("Missing Atlassian Rovo MCP OAuth 2.1 session state.", 400);
+    throw buildError("Missing OAuth session state.", 400);
   }
 
   if (returnedState !== session.oauth.state) {
-    throw buildError("Atlassian Rovo MCP OAuth 2.1 state validation failed.", 400);
+    throw buildError("OAuth state validation failed.", 400);
   }
 
   const token = await requestToken({
@@ -150,6 +152,10 @@ export async function exchangeAuthorizationCode(session, code, returnedState) {
 }
 
 export async function refreshAccessToken(refreshToken) {
+  if (!refreshToken) {
+    throw buildError("Missing refresh token.", 401);
+  }
+
   return requestToken({
     grant_type: "refresh_token",
     client_id: config.atlassian.clientId,
@@ -160,7 +166,7 @@ export async function refreshAccessToken(refreshToken) {
 
 export async function ensureValidAccessToken(session) {
   if (!session.atlassian?.accessToken) {
-    throw buildError("Connect Atlassian Rovo MCP before using MCP tools.", 401);
+    throw buildError("Connect Atlassian before using MCP.", 401);
   }
 
   const expiresSoon = Date.now() >= session.atlassian.expiresAt - 60_000;
@@ -171,23 +177,24 @@ export async function ensureValidAccessToken(session) {
 
   if (!session.atlassian.refreshToken) {
     session.atlassian = null;
-    throw buildError("Atlassian Rovo MCP session expired. Reconnect Atlassian.", 401);
+    throw buildError(
+      "Access token expired and no refresh_token is available. Reconnect Atlassian.",
+      401,
+    );
   }
 
   try {
-    session.atlassian = await refreshAccessToken(session.atlassian.refreshToken);
-    return session.atlassian.accessToken;
+    const refreshed = await refreshAccessToken(session.atlassian.refreshToken);
+    session.atlassian = refreshed;
+    return refreshed.accessToken;
   } catch (error) {
     session.atlassian = null;
-    throw buildError("Atlassian Rovo MCP session refresh failed. Reconnect Atlassian.", 401, {
-      cause: error.details ?? error.message,
-    });
+    throw buildError(
+      "Refresh token exchange failed. Reconnect Atlassian.",
+      401,
+      {
+        cause: error?.details ?? error?.message ?? "Unknown refresh error",
+      },
+    );
   }
 }
-
-
-
-
-
-
-
