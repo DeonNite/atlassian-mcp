@@ -201,6 +201,16 @@ app.get(
         },
       };
     } catch (exchangeError) {
+      const rawDescription =
+        exchangeError?.details?.error_description ??
+        exchangeError?.details?.error ??
+        exchangeError?.message ??
+        "Token exchange failed.";
+      const description =
+        typeof rawDescription === "string"
+          ? rawDescription
+          : JSON.stringify(rawDescription);
+
       req.session.lastOauthCallback = {
         provider: "atlassian-rovo-mcp",
         oauthVersion: "2.1",
@@ -216,7 +226,14 @@ app.get(
         },
       };
 
-      throw exchangeError;
+      const redirectUrl = new URL(config.clientOrigin);
+      redirectUrl.searchParams.set("authError", "token_exchange_failed");
+      redirectUrl.searchParams.set(
+        "authErrorDescription",
+        String(description).slice(0, 500),
+      );
+      res.redirect(redirectUrl.toString());
+      return;
     }
 
     clearConversation(req.session);
@@ -257,7 +274,9 @@ app.get(
 function directToolRoute(alias) {
   return asyncRoute(async (req, res) => {
     const accessToken = await ensureValidAccessToken(req.session);
-    const result = await callAtlassianTool(accessToken, alias, req.body ?? {});
+    const result = await callAtlassianTool(accessToken, alias, req.body ?? {}, {
+      resolveMode: "alias",
+    });
     res.json(result);
   });
 }
@@ -343,8 +362,3 @@ app.listen(config.serverPort, () => {
     `Atlassian MCP demo server listening on http://localhost:${config.serverPort}`,
   );
 });
-
-
-
-
-

@@ -685,7 +685,12 @@ export default function App() {
                           <p>{toolCall.preview}</p>
                         </>
                       ) : toolCall.error ? (
-                        <p className="tool-error">{toolCall.error}</p>
+                        <>
+                          <p className="tool-error">{toolCall.error}</p>
+                          {toolCall.details ? (
+                            <pre>{JSON.stringify(toolCall.details, null, 2)}</pre>
+                          ) : null}
+                        </>
                       ) : (
                         <>
                           <pre>{JSON.stringify(toolCall.args, null, 2)}</pre>
@@ -731,6 +736,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 

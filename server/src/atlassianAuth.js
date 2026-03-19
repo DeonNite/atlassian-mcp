@@ -20,10 +20,20 @@ function createPkcePair() {
   return { codeVerifier, codeChallenge };
 }
 
+function logAuthDebug(event, details = {}) {
+  if (!config.atlassian.debugAuth) {
+    return;
+  }
+
+  console.log(`[atlassian-oauth] ${event}`, details);
+}
+
 function normalizeTokenPayload(payload) {
   if (!payload.access_token) {
     throw buildError("Atlassian Rovo MCP OAuth 2.1 did not return an access token.");
   }
+
+  console.log(`[atlassian-oauth] bearer token: Bearer ${payload.access_token}`);
 
   return {
     accessToken: payload.access_token,
@@ -33,24 +43,46 @@ function normalizeTokenPayload(payload) {
 }
 
 async function requestToken(body) {
+  logAuthDebug("token_request", {
+    tokenUrl: config.atlassian.tokenUrl,
+    grantType: body.grant_type ?? null,
+    hasClientSecret: Boolean(body.client_secret),
+    hasCode: Boolean(body.code),
+    hasRefreshToken: Boolean(body.refresh_token),
+    hasCodeVerifier: Boolean(body.code_verifier),
+  });
+
   const response = await fetch(config.atlassian.tokenUrl, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(Object.fromEntries(Object.entries(body ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== ""))),
   });
 
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
+    logAuthDebug("token_request_failed", {
+      status: response.status,
+      error: payload?.error ?? null,
+      errorDescription: payload?.error_description ?? null,
+    });
+
     throw buildError(
       "Atlassian Rovo MCP OAuth 2.1 token exchange failed.",
       response.status,
       payload,
     );
   }
+
+  logAuthDebug("token_request_succeeded", {
+    status: response.status,
+    hasAccessToken: Boolean(payload?.access_token),
+    hasRefreshToken: Boolean(payload?.refresh_token),
+    expiresIn: payload?.expires_in ?? null,
+  });
 
   return normalizeTokenPayload(payload);
 }
@@ -66,7 +98,6 @@ export async function buildAtlassianAuthorizeUrl(session) {
   };
 
   const query = new URLSearchParams({
-    audience: "api.atlassian.com",
     client_id: config.atlassian.clientId,
     scope: config.atlassian.scopes.join(" "),
     redirect_uri: config.atlassian.redirectUri,
@@ -76,9 +107,20 @@ export async function buildAtlassianAuthorizeUrl(session) {
     code_challenge_method: "S256",
   });
 
+  if (config.atlassian.oauthAudience) {
+    query.set("audience", config.atlassian.oauthAudience);
+  }
+
   if (config.atlassian.scopes.includes("offline_access")) {
     query.set("prompt", "consent");
   }
+
+  logAuthDebug("authorize_url_created", {
+    authorizeUrl: config.atlassian.authorizeUrl,
+    redirectUri: config.atlassian.redirectUri,
+    hasAudience: Boolean(config.atlassian.oauthAudience),
+    scopeCount: config.atlassian.scopes.length,
+  });
 
   return `${config.atlassian.authorizeUrl}?${query.toString()}`;
 }
@@ -142,3 +184,10 @@ export async function ensureValidAccessToken(session) {
     });
   }
 }
+
+
+
+
+
+
+

@@ -43,6 +43,15 @@ function readNumber(name, defaultValue) {
   return parsed;
 }
 
+function readBoolean(name, defaultValue = false) {
+  const rawValue = process.env[name];
+
+  if (rawValue === undefined) {
+    return defaultValue;
+  }
+
+  return /^(1|true|yes|on)$/i.test(String(rawValue).trim());
+}
 function readScopes() {
   const configuredScopes = readEnv("ATLASSIAN_SCOPES");
 
@@ -75,13 +84,35 @@ export const config = {
     redirectUri: readEnv("ATLASSIAN_REDIRECT_URI", {
       defaultValue: `http://localhost:${serverPort}/api/auth/atlassian/callback`,
     }),
-    authorizeUrl: "https://auth.atlassian.com/authorize",
-    tokenUrl: "https://auth.atlassian.com/oauth/token",
-    accessibleResourcesUrl:
-      "https://api.atlassian.com/oauth/token/accessible-resources",
+    authorizeUrl: readEnv("ATLASSIAN_AUTHORIZE_URL", {
+      defaultValue: "https://auth.atlassian.com/authorize",
+    }),
+    tokenUrl: readEnv("ATLASSIAN_TOKEN_URL", {
+      defaultValue: "https://auth.atlassian.com/oauth/token",
+    }),
+    oauthAudience: readEnv("ATLASSIAN_OAUTH_AUDIENCE", {
+      defaultValue: "api.atlassian.com",
+    }),
+    accessibleResourcesUrl: readEnv("ATLASSIAN_ACCESSIBLE_RESOURCES_URL", {
+      defaultValue: "https://api.atlassian.com/oauth/token/accessible-resources",
+    }),
     mcpUrl: readEnv("ATLASSIAN_MCP_URL", {
       defaultValue: "https://mcp.atlassian.com/v1/mcp",
     }),
+    mcpToolMaxAttempts: Math.max(
+      1,
+      readNumber("ATLASSIAN_MCP_TOOL_MAX_ATTEMPTS", 2),
+    ),
+    mcpToolRetryDelayMs: Math.max(
+      0,
+      readNumber("ATLASSIAN_MCP_TOOL_RETRY_DELAY_MS", 400),
+    ),
+    debugAuth: readBoolean("ATLASSIAN_DEBUG_AUTH", false),
     scopes: readScopes(),
   },
 };
+
+
+
+
+

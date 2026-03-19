@@ -206,7 +206,7 @@ export async function generateChatResponse({
           functionCall.name,
           parsedArgs,
           accessToken,
-          defaultCloudId,
+          resolvedCloudId,
           toolRegistry,
         );
 
@@ -230,6 +230,7 @@ export async function generateChatResponse({
         toolCalls.push({
           name: functionCall.name,
           error: error.message,
+          details: error.details ?? null,
         });
 
         functionOutputs.push({
@@ -261,6 +262,9 @@ export async function generateChatResponse({
     toolCalls,
   };
 }
+
+
+
 
 
 

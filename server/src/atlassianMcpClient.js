@@ -140,6 +140,8 @@ const EXCLUDED_DYNAMIC_TOOL_NAMES = new Set([
   "searchAtlassian",
   "getAccessibleAtlassianResources",
 ]);
+const TRANSIENT_MCP_FAILURE_PATTERN =
+  /(trouble completing this action|upstream connect error|connection termination|temporar(?:y|ily)|timed?\s*out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|503|429)/i;
 function normalizeToolsResponse(response) {
   if (Array.isArray(response)) {
     return response;
@@ -239,6 +241,26 @@ function filterArgsForSchema(args, inputSchema) {
       ([key, value]) => allowedKeys.has(key) && shouldKeepValue(value),
     ),
   );
+}
+
+function normalizeStableAliasArgs(identifier, args) {
+  const normalizedIdentifier = String(identifier ?? "").trim();
+  const normalizedArgs =
+    args && typeof args === "object" && !Array.isArray(args) ? { ...args } : {};
+
+  if (normalizedIdentifier !== "createIssue") {
+    return normalizedArgs;
+  }
+
+  if (shouldKeepValue(normalizedArgs.assigneeAccountId) && !shouldKeepValue(normalizedArgs.assignee_account_id)) {
+    normalizedArgs.assignee_account_id = normalizedArgs.assigneeAccountId;
+  }
+
+  if (shouldKeepValue(normalizedArgs.parentIdOrKey) && !shouldKeepValue(normalizedArgs.parent)) {
+    normalizedArgs.parent = normalizedArgs.parentIdOrKey;
+  }
+
+  return normalizedArgs;
 }
 
 function normalizeCloudTarget(value) {
@@ -482,10 +504,172 @@ function isMutatingTool(toolName, description = "") {
   return MUTATING_TOOL_PATTERN.test(`${toolName} ${description}`);
 }
 
+function logMcpDebug(event, details = {}) {
+  if (!config.atlassian.debugAuth) {
+    return;
+  }
+
+  console.log(`[atlassian-mcp] ${event}`, details);
+}
+
+function buildTokenFingerprint(accessToken) {
+  const normalizedToken = String(accessToken ?? "");
+
+  if (!normalizedToken) {
+    return null;
+  }
+
+  return createHash("sha256").update(normalizedToken).digest("hex").slice(0, 12);
+}
+
+function parseJsonObject(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isTransientMcpFailure(error) {
+  if (!error) {
+    return false;
+  }
+
+  const statusCode = Number(error.statusCode ?? error.code ?? 0);
+  const message = String(error.message ?? "");
+  const detailsText = (() => {
+    if (!error.details) {
+      return "";
+    }
+
+    if (typeof error.details === "string") {
+      return error.details;
+    }
+
+    try {
+      return JSON.stringify(error.details);
+    } catch {
+      return "";
+    }
+  })();
+
+  if (error.details?.transient === true) {
+    return true;
+  }
+
+  if (statusCode === 429 || statusCode >= 500) {
+    return true;
+  }
+
+  return TRANSIENT_MCP_FAILURE_PATTERN.test(`${message} ${detailsText}`);
+}
+
+function extractToolExecutionError(result) {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  const contentText = Array.isArray(result.content)
+    ? result.content
+        .filter((item) => item?.type === "text" && typeof item.text === "string")
+        .map((item) => item.text.trim())
+        .filter(Boolean)
+        .join("\n")
+    : "";
+  const parsedContentError = parseJsonObject(contentText);
+  const parsedErrorMessage =
+    parsedContentError?.message ??
+    parsedContentError?.error_description ??
+    null;
+  const hasGenericFailureMessage = /trouble completing this action/i.test(contentText);
+  const hasStructuredError = result.structuredContent?.error === true;
+  const hasTopLevelError = result.error === true || result.isError === true;
+  const hasParsedJsonError = parsedContentError?.error === true;
+
+  if (!hasGenericFailureMessage && !hasStructuredError && !hasTopLevelError && !hasParsedJsonError) {
+    return null;
+  }
+
+  const message =
+    result.structuredContent?.message ??
+    result.structuredContent?.error_description ??
+    parsedErrorMessage ??
+    (contentText || "Atlassian MCP tool returned an error.");
+
+  return {
+    message,
+    transient: TRANSIENT_MCP_FAILURE_PATTERN.test(message),
+    details: {
+      structuredContent: result.structuredContent ?? null,
+      content: Array.isArray(result.content) ? result.content : null,
+      parsedContentError,
+      isError: result.isError ?? null,
+    },
+  };
+}
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runWithMcpRetry(operation, action) {
+  const maxAttempts = Math.max(1, config.atlassian.mcpToolMaxAttempts);
+  const retryDelayMs = Math.max(0, config.atlassian.mcpToolRetryDelayMs);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      const shouldRetry = attempt < maxAttempts && isTransientMcpFailure(error);
+
+      logMcpDebug("retry_decision", {
+        operation,
+        attempt,
+        maxAttempts,
+        shouldRetry,
+        message: error?.message ?? "Unknown MCP error",
+        statusCode: error?.statusCode ?? null,
+      });
+
+      if (!shouldRetry) {
+        throw error;
+      }
+
+      const delayMs = retryDelayMs * attempt;
+
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
+    }
+  }
+
+  throw buildError("Atlassian MCP retry attempts exhausted.", 502);
+}
+
 async function withMcpClient(accessToken, work) {
   const client = new Client({
     name: "atlassian-mcp-openai-demo",
     version: "0.1.0",
+  });
+  const tokenString = String(accessToken ?? "").trim();
+
+  if (!tokenString) {
+    throw buildError("Missing Atlassian access token for MCP transport.", 401);
+  }
+
+  const authorizationHeader = `Bearer ${tokenString}`;
+
+  logMcpDebug("connect_attempt", {
+    mcpUrl: config.atlassian.mcpUrl,
+    hasAccessToken: true,
+    authorizationScheme: "Bearer",
+    accessTokenLength: tokenString.length,
+    accessTokenFingerprint: buildTokenFingerprint(tokenString),
   });
 
   const transport = new StreamableHTTPClientTransport(
@@ -493,16 +677,29 @@ async function withMcpClient(accessToken, work) {
     {
       requestInit: {
         headers: {
-          Authorization: `Bearer ${accessToken}`,
+          Authorization: authorizationHeader,
         },
       },
     },
   );
 
-  await client.connect(transport);
-
   try {
+    await client.connect(transport);
+    logMcpDebug("connect_succeeded", {
+      mcpUrl: config.atlassian.mcpUrl,
+    });
+
     return await work(client);
+  } catch (error) {
+    logMcpDebug("request_failed", {
+      mcpUrl: config.atlassian.mcpUrl,
+      message: error?.message ?? "Unknown MCP error",
+      statusCode: error?.statusCode ?? null,
+      code: error?.code ?? null,
+      details: error?.details ?? null,
+    });
+
+    throw error;
   } finally {
     if (typeof transport.close === "function") {
       await transport.close();
@@ -511,8 +708,10 @@ async function withMcpClient(accessToken, work) {
 }
 
 export async function listAvailableTools(accessToken) {
-  return withMcpClient(accessToken, async (client) =>
-    normalizeToolsResponse(await client.listTools()),
+  return runWithMcpRetry("list_tools", async () =>
+    withMcpClient(accessToken, async (client) =>
+      normalizeToolsResponse(await client.listTools()),
+    ),
   );
 }
 
@@ -603,40 +802,58 @@ export async function callAtlassianTool(
   options = {},
 ) {
   const { resolveMode = "auto", availableTools = null } = options;
+  const normalizedArgs = normalizeStableAliasArgs(identifier, args);
+  const operation = `call_tool:${String(identifier ?? "unknown")}`;
 
-  return withMcpClient(accessToken, async (client) => {
-    const tools = normalizeToolsResponse(
-      availableTools ?? (await client.listTools()),
-    );
-    const tool =
-      resolveMode === "alias"
-        ? resolveAliasTool(identifier, tools)
-        : resolveMode === "name"
-          ? resolveToolByName(identifier, tools)
-          : (() => {
-              try {
-                return resolveToolByName(identifier, tools);
-              } catch {
-                return resolveAliasTool(identifier, tools);
-              }
-            })();
-    const resolvedArgs = await resolveCloudIdArg(accessToken, args);
-    const filteredArgs = filterArgsForSchema(resolvedArgs, tool.inputSchema);
+  return runWithMcpRetry(operation, async () =>
+    withMcpClient(accessToken, async (client) => {
+      const tools = normalizeToolsResponse(
+        availableTools ?? (await client.listTools()),
+      );
+      const tool =
+        resolveMode === "alias"
+          ? resolveAliasTool(identifier, tools)
+          : resolveMode === "name"
+            ? resolveToolByName(identifier, tools)
+            : (() => {
+                try {
+                  return resolveAliasTool(identifier, tools);
+                } catch {
+                  return resolveToolByName(identifier, tools);
+                }
+              })();
+      const resolvedArgs = await resolveCloudIdArg(accessToken, normalizedArgs);
+      const filteredArgs = filterArgsForSchema(resolvedArgs, tool.inputSchema);
 
-    const result = await client.callTool({
-      name: tool.name,
-      arguments: filteredArgs,
-    });
+      const result = await client.callTool({
+        name: tool.name,
+        arguments: filteredArgs,
+      });
+      const toolExecutionError = extractToolExecutionError(result);
 
-    return {
-      alias: resolveMode === "alias" ? identifier : null,
-      toolName: tool.name,
-      input: filteredArgs,
-      result,
-    };
-  });
+      logMcpDebug("tool_result", {
+        toolName: tool.name,
+        hasStructuredContent: Boolean(result?.structuredContent),
+        contentItems: Array.isArray(result?.content) ? result.content.length : 0,
+        isError: Boolean(toolExecutionError),
+      });
+
+      if (toolExecutionError) {
+        throw buildError(toolExecutionError.message, 502, {
+          toolName: tool.name,
+          input: filteredArgs,
+          transient: toolExecutionError.transient,
+          ...toolExecutionError.details,
+        });
+      }
+
+      return {
+        alias: resolveMode === "alias" ? identifier : null,
+        toolName: tool.name,
+        input: filteredArgs,
+        result,
+      };
+    }),
+  );
 }
-
-
-
 
